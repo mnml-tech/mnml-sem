@@ -1,7 +1,7 @@
 //! Compile MNML JSON expressions into [`Expr`](super::expr::Expr).
 
 use crate::model::{envelope_from_expression, field_mnml_expr_value};
-use crate::model::mnml_expression::{MnmlExpressionEnvelope, MnmlExpressionKind, MnmlMetricDef};
+use crate::model::mnml_expression::{MnmlExpressionKind, MnmlMetricDef};
 use crate::model::{Field, Metric, SemanticModel};
 use crate::plan::expr::{AggFunc, Expr, Literal};
 use crate::resolver::QueryError;
@@ -13,42 +13,9 @@ pub struct MnmlResolveCtx<'a> {
     pub default_dataset: Option<&'a str>,
 }
 
-/// Convert a field or metric MNML envelope to [`Expr`].
-pub fn envelope_to_expr(
-    env: &MnmlExpressionEnvelope,
-    ctx: &MnmlResolveCtx<'_>,
-) -> Result<Expr, QueryError> {
-    match env.kind {
-        MnmlExpressionKind::FieldExpr => mnml_value_to_expr(&env.expr, ctx),
-        MnmlExpressionKind::Metric => {
-            let def: MnmlMetricDef = serde_json::from_value(env.expr.clone()).map_err(|e| {
-                QueryError::InvalidMnmlExpression(format!("metric expr: {e}"))
-            })?;
-            metric_def_to_expr(&def, ctx)
-        }
-    }
-}
-
 fn field_mnml_expr_json(field: &Field) -> Result<Option<serde_json::Value>, QueryError> {
-    if let Some(v) = envelope_from_expression(&field.expression, MnmlExpressionKind::FieldExpr)
-        .map_err(|e| QueryError::InvalidMnmlExpression(e))?
-    {
-        return Ok(Some(v));
-    }
-    let Some(env) = crate::model::mnml_expression::parse_mnml_expression_extension(
-        &field.custom_extensions,
-    )
-    .map_err(|e| QueryError::InvalidMnmlExpression(e.to_string()))?
-    else {
-        return Ok(None);
-    };
-    if env.kind != MnmlExpressionKind::FieldExpr {
-        return Err(QueryError::InvalidMnmlExpression(format!(
-            "field {:?} MNML kind must be field_expr",
-            field.name
-        )));
-    }
-    Ok(Some(env.expr))
+    envelope_from_expression(&field.expression, MnmlExpressionKind::FieldExpr)
+        .map_err(QueryError::InvalidMnmlExpression)
 }
 
 /// Convert MNML dialect or legacy extension on a [`Field`] when present; otherwise `None`.
@@ -64,25 +31,8 @@ pub fn field_to_expr(field: &Field, dataset: &str, model: &SemanticModel) -> Res
 }
 
 fn metric_mnml_def_json(metric: &Metric) -> Result<Option<serde_json::Value>, QueryError> {
-    if let Some(v) = envelope_from_expression(&metric.expression, MnmlExpressionKind::Metric)
-        .map_err(|e| QueryError::InvalidMnmlExpression(e))?
-    {
-        return Ok(Some(v));
-    }
-    let Some(env) = crate::model::mnml_expression::parse_mnml_expression_extension(
-        &metric.custom_extensions,
-    )
-    .map_err(|e| QueryError::InvalidMnmlExpression(e.to_string()))?
-    else {
-        return Ok(None);
-    };
-    if env.kind != MnmlExpressionKind::Metric {
-        return Err(QueryError::InvalidMnmlExpression(format!(
-            "metric {:?} MNML kind must be metric",
-            metric.name
-        )));
-    }
-    Ok(Some(env.expr))
+    envelope_from_expression(&metric.expression, MnmlExpressionKind::Metric)
+        .map_err(QueryError::InvalidMnmlExpression)
 }
 
 /// Convert MNML dialect or legacy extension on a [`Metric`] when present; otherwise `None`.

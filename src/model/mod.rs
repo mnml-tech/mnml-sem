@@ -25,10 +25,7 @@ pub use extensions::{
     CustomExtension, MnmlDatasetStorage, MnmlPartitioning, MnmlPartitioningStyle,
     MnmlStorageFormat, parse_mnml_dataset_storage_extensions,
 };
-pub use mnml_expression::{
-    MnmlExpressionEnvelope, MnmlExpressionKind, MnmlMetricDef, is_mnml_storage_json,
-    parse_mnml_expression_extension,
-};
+pub use mnml_expression::{MnmlExpressionKind, MnmlMetricDef, is_mnml_storage_json};
 pub use field::{Field, FieldDimension};
 pub use metric::Metric;
 pub use relationship::Relationship;

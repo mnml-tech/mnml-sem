@@ -2,8 +2,8 @@
 
 use crate::error::Error;
 use crate::model::{
-    count_mnml_dialects, pick_mnml_dialect, CustomExtension, Expression, MnmlDatasetStorage,
-    MnmlExpressionKind, OsiDocument, envelope_from_expression, parse_mnml_expression_extension,
+    count_mnml_dialects, pick_mnml_dialect, Expression, MnmlDatasetStorage, MnmlExpressionKind,
+    OsiDocument, envelope_from_expression,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -62,7 +62,6 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
             validate_expression_or_mnml(
                 &format!("field {:?}.{:?}", dataset.name, field.name),
                 &field.expression,
-                &field.custom_extensions,
                 issues,
                 MnmlExpressionKind::FieldExpr,
             );
@@ -105,7 +104,6 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
         validate_expression_or_mnml(
             &format!("metric {:?}", metric.name),
             &metric.expression,
-            &metric.custom_extensions,
             issues,
             MnmlExpressionKind::Metric,
         );
@@ -158,11 +156,10 @@ fn validate_expression_nonempty(context: &str, expr: &Expression, issues: &mut V
     }
 }
 
-/// Require MNML dialect or extension **or** at least one OSI dialect entry.
+/// Require a valid MNML dialect entry **or** at least one OSI dialect entry.
 fn validate_expression_or_mnml(
     context: &str,
     expr: &Expression,
-    extensions: &[CustomExtension],
     issues: &mut Vec<String>,
     kind: MnmlExpressionKind,
 ) {
@@ -170,29 +167,6 @@ fn validate_expression_or_mnml(
     if dialect_count > 1 {
         issues.push(format!(
             "[MNML] {context} has multiple MNML dialect entries; expected at most one"
-        ));
-    }
-
-    let mut ext_count = 0usize;
-    for ext in extensions {
-        if ext.vendor_name == crate::model::Vendor::Mnml
-            && !crate::model::is_mnml_storage_json(&ext.data)
-            && serde_json::from_str::<serde_json::Value>(&ext.data)
-                .ok()
-                .is_some_and(|v| v.get("kind").is_some())
-        {
-            ext_count += 1;
-        }
-    }
-    if ext_count > 1 {
-        issues.push(format!(
-            "[MNML] {context} has multiple MNML expression extensions; expected at most one"
-        ));
-    }
-
-    if dialect_count > 0 && ext_count > 0 {
-        issues.push(format!(
-            "[MNML] {context} must use either MNML dialect or MNML custom_extensions expression, not both"
         ));
     }
 
@@ -208,20 +182,7 @@ fn validate_expression_or_mnml(
         return;
     }
 
-    match parse_mnml_expression_extension(extensions) {
-        Ok(Some(env)) => {
-            if env.kind != kind {
-                issues.push(format!(
-                    "[MNML] {context} extension kind {:?} does not match expected {:?}",
-                    env.kind, kind
-                ));
-            }
-        }
-        Ok(None) => validate_expression_nonempty(context, expr, issues),
-        Err(e) => issues.push(format!(
-            "[MNML] {context} has invalid MNML expression extension: {e}",
-        )),
-    }
+    validate_expression_nonempty(context, expr, issues);
 }
 
 fn validate_mnml_dataset_storage(
