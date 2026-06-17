@@ -11,7 +11,7 @@ use substrait::proto::{
         ReferenceSegment,
     },
     extensions::{
-        simple_extension_declaration::MappingType, SimpleExtensionDeclaration, SimpleExtensionUri,
+        simple_extension_declaration::MappingType, SimpleExtensionDeclaration, SimpleExtensionUrn,
     },
     function_argument::ArgType,
     plan_rel::RelType as PlanRelType,
@@ -25,11 +25,11 @@ use crate::emit::EmitError;
 use crate::plan::expr::{AggFunc, ColumnRef, Expr, JoinKey, Literal};
 use crate::plan::{LogicalPlan, NamedAggregate};
 
-const URI_AGGREGATE: u32 = 1;
-const URI_COMPARISON: u32 = 2;
-const URI_BOOLEAN: u32 = 3;
-const URI_ARITHMETIC: u32 = 4;
-const URI_DATETIME: u32 = 5;
+const URN_AGGREGATE: u32 = 1;
+const URN_COMPARISON: u32 = 2;
+const URN_BOOLEAN: u32 = 3;
+const URN_ARITHMETIC: u32 = 4;
+const URN_DATETIME: u32 = 5;
 
 const FUNC_SUM: u32 = 1;
 const FUNC_AVG: u32 = 2;
@@ -110,11 +110,11 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
     Ok(proto::Plan {
         version: Some(proto::Version {
             major_number: 0,
-            minor_number: 62,
+            minor_number: 63,
             patch_number: 0,
             ..Default::default()
         }),
-        extension_uris: build_extension_uris(),
+        extension_urns: build_extension_urns(),
         extensions: build_extensions(),
         relations: vec![proto::PlanRel {
             rel_type: Some(PlanRelType::Root(proto::RelRoot {
@@ -529,58 +529,57 @@ fn string_type() -> proto::Type {
     }
 }
 
-#[allow(deprecated)]
-fn make_function_extension(uri_ref: u32, anchor: u32, name: &str) -> SimpleExtensionDeclaration {
+fn make_function_extension(urn_ref: u32, anchor: u32, name: &str) -> SimpleExtensionDeclaration {
     SimpleExtensionDeclaration {
         mapping_type: Some(MappingType::ExtensionFunction(
             proto::extensions::simple_extension_declaration::ExtensionFunction {
-                extension_uri_reference: uri_ref,
-                extension_urn_reference: uri_ref,
+                extension_urn_reference: urn_ref,
                 function_anchor: anchor,
                 name: name.to_string(),
+                ..Default::default()
             },
         )),
     }
 }
 
-fn build_extension_uris() -> Vec<SimpleExtensionUri> {
+fn build_extension_urns() -> Vec<SimpleExtensionUrn> {
     vec![
-        SimpleExtensionUri {
-            extension_uri_anchor: URI_AGGREGATE,
-            uri: "/functions_aggregate_generic.yaml".to_string(),
+        SimpleExtensionUrn {
+            extension_urn_anchor: URN_AGGREGATE,
+            urn: "extension:io.substrait:functions_aggregate_generic".to_string(),
         },
-        SimpleExtensionUri {
-            extension_uri_anchor: URI_COMPARISON,
-            uri: "/functions_comparison.yaml".to_string(),
+        SimpleExtensionUrn {
+            extension_urn_anchor: URN_COMPARISON,
+            urn: "extension:io.substrait:functions_comparison".to_string(),
         },
-        SimpleExtensionUri {
-            extension_uri_anchor: URI_BOOLEAN,
-            uri: "/functions_boolean.yaml".to_string(),
+        SimpleExtensionUrn {
+            extension_urn_anchor: URN_BOOLEAN,
+            urn: "extension:io.substrait:functions_boolean".to_string(),
         },
-        SimpleExtensionUri {
-            extension_uri_anchor: URI_ARITHMETIC,
-            uri: "/functions_arithmetic.yaml".to_string(),
+        SimpleExtensionUrn {
+            extension_urn_anchor: URN_ARITHMETIC,
+            urn: "extension:io.substrait:functions_arithmetic".to_string(),
         },
-        SimpleExtensionUri {
-            extension_uri_anchor: URI_DATETIME,
-            uri: "/functions_datetime.yaml".to_string(),
+        SimpleExtensionUrn {
+            extension_urn_anchor: URN_DATETIME,
+            urn: "extension:io.substrait:functions_datetime".to_string(),
         },
     ]
 }
 
 fn build_extensions() -> Vec<SimpleExtensionDeclaration> {
     vec![
-        make_function_extension(URI_AGGREGATE, FUNC_SUM, "sum"),
-        make_function_extension(URI_AGGREGATE, FUNC_AVG, "avg"),
-        make_function_extension(URI_AGGREGATE, FUNC_COUNT, "count"),
-        make_function_extension(URI_AGGREGATE, FUNC_MIN, "min"),
-        make_function_extension(URI_AGGREGATE, FUNC_MAX, "max"),
-        make_function_extension(URI_COMPARISON, FUNC_EQUAL, "equal"),
-        make_function_extension(URI_COMPARISON, FUNC_NOT_EQUAL, "not_equal"),
-        make_function_extension(URI_BOOLEAN, FUNC_AND, "and"),
-        make_function_extension(URI_BOOLEAN, FUNC_OR, "or"),
-        make_function_extension(URI_ARITHMETIC, FUNC_SUBTRACT, "subtract"),
-        make_function_extension(URI_DATETIME, FUNC_CURRENT_DATE, "current_date"),
+        make_function_extension(URN_AGGREGATE, FUNC_SUM, "sum"),
+        make_function_extension(URN_AGGREGATE, FUNC_AVG, "avg"),
+        make_function_extension(URN_AGGREGATE, FUNC_COUNT, "count"),
+        make_function_extension(URN_AGGREGATE, FUNC_MIN, "min"),
+        make_function_extension(URN_AGGREGATE, FUNC_MAX, "max"),
+        make_function_extension(URN_COMPARISON, FUNC_EQUAL, "equal"),
+        make_function_extension(URN_COMPARISON, FUNC_NOT_EQUAL, "not_equal"),
+        make_function_extension(URN_BOOLEAN, FUNC_AND, "and"),
+        make_function_extension(URN_BOOLEAN, FUNC_OR, "or"),
+        make_function_extension(URN_ARITHMETIC, FUNC_SUBTRACT, "subtract"),
+        make_function_extension(URN_DATETIME, FUNC_CURRENT_DATE, "current_date"),
     ]
 }
 
