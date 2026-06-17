@@ -28,6 +28,7 @@ OSI ──► validate ──► bind_query(model, SemanticQuery) ──► Logi
 | **Planning** | `LogicalPlan` for emission or inspection |
 | **Emit** | **`emit::substrait::to_plan`** — primary (default feature `substrait`) |
 | **Emit** | `emit::sql::to_sql` — secondary; same structured plan |
+| **Expressions** | Structured **MNML** dialect for fields & metrics — see [`docs/mnml-expressions.md`](docs/mnml-expressions.md) |
 
 ## Example
 
