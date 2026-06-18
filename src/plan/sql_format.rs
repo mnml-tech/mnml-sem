@@ -1,7 +1,19 @@
 //! Format structured [`Expr`](super::expr::Expr) as ANSI-style SQL fragments.
 
-use super::expr::{AggFunc, ColumnRef, Expr, JoinKey, Literal};
+use super::expr::{ColumnRef, Expr, JoinKey, Literal};
+use crate::catalog::{self, Func, SqlForm};
 use crate::sql_quote::dotted_osi_name_as_sql_table_expr;
+
+/// Render a catalog function from pre-formatted operand SQL.
+fn render(func: Func, operands: &[String]) -> String {
+    match catalog::def(func).sql {
+        SqlForm::Infix(op) => format!("{} {op} {}", operands[0], operands[1]),
+        SqlForm::InfixParen(op) => format!("({} {op} {})", operands[0], operands[1]),
+        SqlForm::Variadic(op) => operands.join(&format!(" {op} ")),
+        SqlForm::Call(name) => format!("{name}({})", operands.join(", ")),
+        SqlForm::Keyword(kw) => kw.to_string(),
+    }
+}
 
 pub fn format_column(col: &ColumnRef, qualify: bool) -> String {
     if qualify && !col.dataset.is_empty() {
@@ -16,21 +28,18 @@ pub fn format_expr(expr: &Expr, qualify: bool) -> String {
     match expr {
         Expr::Column(c) => format_column(c, qualify),
         Expr::Literal(lit) => format_literal(lit),
-        Expr::Eq(l, r) => format!(
-            "{} = {}",
-            format_expr(l, qualify),
-            format_expr(r, qualify)
+        Expr::Eq(l, r) => render(
+            Func::Equal,
+            &[format_expr(l, qualify), format_expr(r, qualify)],
         ),
-        Expr::Ne(l, r) => format!(
-            "{} <> {}",
-            format_expr(l, qualify),
-            format_expr(r, qualify)
+        Expr::Ne(l, r) => render(
+            Func::NotEqual,
+            &[format_expr(l, qualify), format_expr(r, qualify)],
         ),
-        Expr::And(exprs) => exprs
-            .iter()
-            .map(|e| format_expr(e, qualify))
-            .collect::<Vec<_>>()
-            .join(" AND "),
+        Expr::And(exprs) => render(
+            Func::And,
+            &exprs.iter().map(|e| format_expr(e, qualify)).collect::<Vec<_>>(),
+        ),
         Expr::In { expr, values } => {
             let vals: Vec<String> = values.iter().map(format_literal).collect();
             format!("{} IN ({})", format_expr(expr, qualify), vals.join(", "))
@@ -53,25 +62,18 @@ pub fn format_expr(expr: &Expr, qualify: bool) -> String {
                 format_expr(else_expr, qualify)
             )
         }
-        Expr::Sub(l, r) => format!(
-            "({} - {})",
-            format_expr(l, qualify),
-            format_expr(r, qualify)
+        Expr::Sub(l, r) => render(
+            Func::Subtract,
+            &[format_expr(l, qualify), format_expr(r, qualify)],
         ),
-        Expr::CurrentDate => "CURRENT_DATE".to_string(),
+        Expr::CurrentDate => render(Func::CurrentDate, &[]),
         Expr::Agg { func, distinct, arg } => {
             let distinct_s = if *distinct { "DISTINCT " } else { "" };
             let inner = match arg {
                 None => "*".to_string(),
                 Some(a) => format_expr(a, qualify),
             };
-            let name = match func {
-                AggFunc::Count => "COUNT",
-                AggFunc::Sum => "SUM",
-                AggFunc::Avg => "AVG",
-                AggFunc::Min => "MIN",
-                AggFunc::Max => "MAX",
-            };
+            let name = catalog::def(func.to_func()).call_name();
             format!("{name}({distinct_s}{inner})")
         }
         Expr::Sql(s) => s.clone(),

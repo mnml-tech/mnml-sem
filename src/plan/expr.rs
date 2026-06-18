@@ -58,6 +58,20 @@ pub enum AggFunc {
     Max,
 }
 
+impl AggFunc {
+    /// Logical [`catalog`](crate::catalog) function for this aggregate.
+    pub fn to_func(self) -> crate::catalog::Func {
+        use crate::catalog::Func;
+        match self {
+            AggFunc::Count => Func::Count,
+            AggFunc::Sum => Func::Sum,
+            AggFunc::Avg => Func::Avg,
+            AggFunc::Min => Func::Min,
+            AggFunc::Max => Func::Max,
+        }
+    }
+}
+
 /// Structured expression tree.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {

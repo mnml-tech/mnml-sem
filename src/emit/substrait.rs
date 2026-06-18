@@ -21,27 +21,10 @@ use substrait::proto::{
     AggregationPhase,
 };
 
+use crate::catalog::{self, Func};
 use crate::emit::EmitError;
-use crate::plan::expr::{AggFunc, ColumnRef, Expr, JoinKey, Literal};
+use crate::plan::expr::{ColumnRef, Expr, JoinKey, Literal};
 use crate::plan::{LogicalPlan, NamedAggregate};
-
-const URN_AGGREGATE: u32 = 1;
-const URN_COMPARISON: u32 = 2;
-const URN_BOOLEAN: u32 = 3;
-const URN_ARITHMETIC: u32 = 4;
-const URN_DATETIME: u32 = 5;
-
-const FUNC_SUM: u32 = 1;
-const FUNC_AVG: u32 = 2;
-const FUNC_COUNT: u32 = 3;
-const FUNC_MIN: u32 = 5;
-const FUNC_MAX: u32 = 6;
-const FUNC_EQUAL: u32 = 100;
-const FUNC_NOT_EQUAL: u32 = 101;
-const FUNC_AND: u32 = 200;
-const FUNC_OR: u32 = 201;
-const FUNC_SUBTRACT: u32 = 300;
-const FUNC_CURRENT_DATE: u32 = 400;
 
 #[derive(Debug, Clone)]
 struct SchemaContext {
@@ -307,13 +290,7 @@ fn emit_measure(agg: &NamedAggregate, ctx: &SchemaContext) -> Result<Measure, Em
         )));
     };
 
-    let (function_reference, invocation) = match func {
-        AggFunc::Sum => (FUNC_SUM, AggregationInvocation::All),
-        AggFunc::Avg => (FUNC_AVG, AggregationInvocation::All),
-        AggFunc::Count => (FUNC_COUNT, AggregationInvocation::All),
-        AggFunc::Min => (FUNC_MIN, AggregationInvocation::All),
-        AggFunc::Max => (FUNC_MAX, AggregationInvocation::All),
-    };
+    let function_reference = catalog::def(func.to_func()).anchor;
 
     let arg_expr = match arg {
         None => i64_literal(1),
@@ -331,7 +308,7 @@ fn emit_measure(agg: &NamedAggregate, ctx: &SchemaContext) -> Result<Measure, Em
             invocation: if *distinct {
                 AggregationInvocation::Distinct as i32
             } else {
-                invocation as i32
+                AggregationInvocation::All as i32
             },
             ..Default::default()
         }),
@@ -351,11 +328,11 @@ fn emit_expr(expr: &Expr, ctx: &SchemaContext) -> Result<proto::Expression, Emit
             when_then,
             else_expr,
         } => emit_case(when_then, Some(else_expr.as_ref()), ctx),
-        Expr::Sub(l, r) => Ok(scalar_fn(
-            FUNC_SUBTRACT,
+        Expr::Sub(l, r) => Ok(scalar(
+            Func::Subtract,
             vec![emit_expr(l, ctx)?, emit_expr(r, ctx)?],
         )),
-        Expr::CurrentDate => Ok(scalar_fn(FUNC_CURRENT_DATE, vec![])),
+        Expr::CurrentDate => Ok(scalar(Func::CurrentDate, vec![])),
         Expr::Agg { .. } => Err(EmitError::UnsupportedExpression(
             "aggregate Expr belongs in NamedAggregate".to_string(),
         )),
@@ -416,13 +393,13 @@ fn emit_in(
 fn emit_binary_eq(l: &Expr, r: &Expr, ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
     let left = emit_expr(l, ctx)?;
     let right = emit_expr(r, ctx)?;
-    Ok(scalar_fn(FUNC_EQUAL, vec![left, right]))
+    Ok(scalar(Func::Equal, vec![left, right]))
 }
 
 fn emit_binary_ne(l: &Expr, r: &Expr, ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
     let left = emit_expr(l, ctx)?;
     let right = emit_expr(r, ctx)?;
-    Ok(scalar_fn(FUNC_NOT_EQUAL, vec![left, right]))
+    Ok(scalar(Func::NotEqual, vec![left, right]))
 }
 
 fn emit_and(exprs: &[Expr], ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
@@ -485,13 +462,18 @@ fn emit_field_reference(field: u32) -> Result<proto::Expression, EmitError> {
 }
 
 fn binary_eq_field_ref(left: u32, right: u32) -> proto::Expression {
-    scalar_fn(
-        FUNC_EQUAL,
+    scalar(
+        Func::Equal,
         vec![
             emit_field_reference(left).unwrap(),
             emit_field_reference(right).unwrap(),
         ],
     )
+}
+
+/// Scalar function call referencing `func`'s catalog anchor.
+fn scalar(func: Func, args: Vec<proto::Expression>) -> proto::Expression {
+    scalar_fn(catalog::def(func).anchor, args)
 }
 
 fn scalar_fn(function_reference: u32, args: Vec<proto::Expression>) -> proto::Expression {
@@ -513,11 +495,11 @@ fn scalar_fn(function_reference: u32, args: Vec<proto::Expression>) -> proto::Ex
 }
 
 fn and_two(a: proto::Expression, b: proto::Expression) -> proto::Expression {
-    scalar_fn(FUNC_AND, vec![a, b])
+    scalar(Func::And, vec![a, b])
 }
 
 fn or_two(a: proto::Expression, b: proto::Expression) -> proto::Expression {
-    scalar_fn(FUNC_OR, vec![a, b])
+    scalar(Func::Or, vec![a, b])
 }
 
 fn string_type() -> proto::Type {
@@ -536,51 +518,26 @@ fn make_function_extension(urn_ref: u32, anchor: u32, name: &str) -> SimpleExten
                 extension_urn_reference: urn_ref,
                 function_anchor: anchor,
                 name: name.to_string(),
-                ..Default::default()
             },
         )),
     }
 }
 
 fn build_extension_urns() -> Vec<SimpleExtensionUrn> {
-    vec![
-        SimpleExtensionUrn {
-            extension_urn_anchor: URN_AGGREGATE,
-            urn: "extension:io.substrait:functions_aggregate_generic".to_string(),
-        },
-        SimpleExtensionUrn {
-            extension_urn_anchor: URN_COMPARISON,
-            urn: "extension:io.substrait:functions_comparison".to_string(),
-        },
-        SimpleExtensionUrn {
-            extension_urn_anchor: URN_BOOLEAN,
-            urn: "extension:io.substrait:functions_boolean".to_string(),
-        },
-        SimpleExtensionUrn {
-            extension_urn_anchor: URN_ARITHMETIC,
-            urn: "extension:io.substrait:functions_arithmetic".to_string(),
-        },
-        SimpleExtensionUrn {
-            extension_urn_anchor: URN_DATETIME,
-            urn: "extension:io.substrait:functions_datetime".to_string(),
-        },
-    ]
+    catalog::extension_groups()
+        .into_iter()
+        .map(|g| SimpleExtensionUrn {
+            extension_urn_anchor: g.anchor,
+            urn: g.urn.to_string(),
+        })
+        .collect()
 }
 
 fn build_extensions() -> Vec<SimpleExtensionDeclaration> {
-    vec![
-        make_function_extension(URN_AGGREGATE, FUNC_SUM, "sum"),
-        make_function_extension(URN_AGGREGATE, FUNC_AVG, "avg"),
-        make_function_extension(URN_AGGREGATE, FUNC_COUNT, "count"),
-        make_function_extension(URN_AGGREGATE, FUNC_MIN, "min"),
-        make_function_extension(URN_AGGREGATE, FUNC_MAX, "max"),
-        make_function_extension(URN_COMPARISON, FUNC_EQUAL, "equal"),
-        make_function_extension(URN_COMPARISON, FUNC_NOT_EQUAL, "not_equal"),
-        make_function_extension(URN_BOOLEAN, FUNC_AND, "and"),
-        make_function_extension(URN_BOOLEAN, FUNC_OR, "or"),
-        make_function_extension(URN_ARITHMETIC, FUNC_SUBTRACT, "subtract"),
-        make_function_extension(URN_DATETIME, FUNC_CURRENT_DATE, "current_date"),
-    ]
+    catalog::CATALOG
+        .iter()
+        .map(|d| make_function_extension(d.group.anchor, d.anchor, d.name))
+        .collect()
 }
 
 #[cfg(test)]

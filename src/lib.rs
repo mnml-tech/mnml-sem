@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 pub mod emit;
 pub mod error;
 pub mod model;
