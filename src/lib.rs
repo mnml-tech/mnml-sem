@@ -16,14 +16,16 @@ pub mod plan;
 pub mod planner;
 pub mod query;
 pub mod resolver;
+pub mod sql_dialect;
 pub(crate) mod sql_quote;
 pub mod validate;
 
 pub use resolver::QueryError;
 
 pub mod prelude {
-    pub use crate::emit::sql::to_sql;
+    pub use crate::emit::sql::{to_sql, to_sql_with};
     pub use crate::emit::EmitError;
+    pub use crate::sql_dialect::{Ansi, BigQuery, SqlDialect};
     pub use crate::error::Error;
     pub use crate::model::OsiDocument;
     pub use crate::parser::{from_file, from_json_str, from_yaml_str};

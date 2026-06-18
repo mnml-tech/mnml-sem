@@ -9,7 +9,7 @@ use crate::model::{Dialect, Expression};
 
 pub use display::DisplayIndent;
 pub use expr::{AggFunc, ColumnRef, Expr, JoinKey, Literal, parse_column_sql, parse_metric_sql};
-pub use sql_format::{format_column, format_expr, format_join_on};
+pub use sql_format::{format_column, format_expr, format_join_on, SqlCtx};
 
 /// Root logical plan node (scan / join → optional filter → aggregate).
 #[derive(Debug, Clone)]

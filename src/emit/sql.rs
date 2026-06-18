@@ -3,17 +3,29 @@
 //! SQL is derived from the structured plan (secondary to Substrait).
 
 use crate::emit::EmitError;
-use crate::plan::{format_expr, format_join_on};
+use crate::plan::{format_expr, format_join_on, SqlCtx};
 use crate::plan::{LogicalPlan, NamedAggregate};
+use crate::sql_dialect::{Ansi, SqlDialect};
 
-/// Build a single `SELECT` statement for the plan tree.
+/// Build a single ANSI `SELECT` statement for the plan tree.
 pub fn to_sql(plan: &LogicalPlan) -> Result<String, EmitError> {
+    to_sql_with(plan, &Ansi)
+}
+
+/// Build a single `SELECT` statement for the plan tree in the given SQL `dialect`.
+pub fn to_sql_with(plan: &LogicalPlan, dialect: &dyn SqlDialect) -> Result<String, EmitError> {
     match plan {
         LogicalPlan::Aggregate {
             input,
             group_by,
             aggregates,
-        } => emit_aggregate_root(input.as_ref(), group_by, aggregates, is_multi_table(input)),
+        } => {
+            let ctx = SqlCtx {
+                dialect,
+                qualify: is_multi_table(input),
+            };
+            emit_aggregate_root(input.as_ref(), group_by, aggregates, ctx)
+        }
         _ => Err(EmitError::Unsupported(
             "root must be Aggregate (use planner output)",
         )),
@@ -32,20 +44,17 @@ fn emit_aggregate_root(
     input: &LogicalPlan,
     group_by: &[crate::plan::Expr],
     aggregates: &[NamedAggregate],
-    qualify: bool,
+    ctx: SqlCtx,
 ) -> Result<String, EmitError> {
-    let (from_sql, where_sql) = from_and_where(input, qualify)?;
+    let (from_sql, where_sql) = from_and_where(input, ctx)?;
 
-    let mut select_items: Vec<String> = group_by
-        .iter()
-        .map(|e| format_expr(e, qualify))
-        .collect();
+    let mut select_items: Vec<String> = group_by.iter().map(|e| format_expr(e, ctx)).collect();
 
     for a in aggregates {
         select_items.push(format!(
             "{} AS {}",
-            format_expr(&a.expr, qualify),
-            quote_ident(&a.name)
+            format_expr(&a.expr, ctx),
+            ctx.dialect.quote_ident(&a.name)
         ));
     }
 
@@ -66,7 +75,7 @@ fn emit_aggregate_root(
         sql.push_str(
             &group_by
                 .iter()
-                .map(|e| format_expr(e, qualify))
+                .map(|e| format_expr(e, ctx))
                 .collect::<Vec<_>>()
                 .join(", "),
         );
@@ -75,20 +84,17 @@ fn emit_aggregate_root(
     Ok(sql)
 }
 
-fn from_and_where(
-    plan: &LogicalPlan,
-    qualify: bool,
-) -> Result<(String, Option<String>), EmitError> {
+fn from_and_where(plan: &LogicalPlan, ctx: SqlCtx) -> Result<(String, Option<String>), EmitError> {
     match plan {
         LogicalPlan::Filter { input, predicate } => {
-            let (from, preds) = collect_filters(input.as_ref(), vec![predicate.clone()], qualify)?;
+            let (from, preds) = collect_filters(input.as_ref(), vec![predicate.clone()], ctx)?;
             let where_clause = match preds.len() {
                 0 => None,
-                1 => Some(format_expr(&preds[0], qualify)),
+                1 => Some(format_expr(&preds[0], ctx)),
                 _ => Some(
                     preds
                         .iter()
-                        .map(|p| format_expr(p, qualify))
+                        .map(|p| format_expr(p, ctx))
                         .collect::<Vec<_>>()
                         .join(" AND "),
                 ),
@@ -96,7 +102,7 @@ fn from_and_where(
             Ok((from, where_clause))
         }
         _ => {
-            let from = from_join_or_scan(plan, qualify)?;
+            let from = from_join_or_scan(plan, ctx)?;
             Ok((from, None))
         }
     }
@@ -105,28 +111,27 @@ fn from_and_where(
 fn collect_filters(
     plan: &LogicalPlan,
     mut preds: Vec<crate::plan::Expr>,
-    qualify: bool,
+    ctx: SqlCtx,
 ) -> Result<(String, Vec<crate::plan::Expr>), EmitError> {
     match plan {
         LogicalPlan::Filter { input, predicate } => {
             preds.push(predicate.clone());
-            collect_filters(input.as_ref(), preds, qualify)
+            collect_filters(input.as_ref(), preds, ctx)
         }
         _ => {
-            let from = from_join_or_scan(plan, qualify)?;
+            let from = from_join_or_scan(plan, ctx)?;
             Ok((from, preds))
         }
     }
 }
 
-fn from_join_or_scan(plan: &LogicalPlan, qualify: bool) -> Result<String, EmitError> {
-    use crate::sql_quote::dotted_osi_name_as_sql_table_expr;
+fn from_join_or_scan(plan: &LogicalPlan, ctx: SqlCtx) -> Result<String, EmitError> {
     match plan {
-        LogicalPlan::Scan { source, .. } => Ok(dotted_osi_name_as_sql_table_expr(source)),
+        LogicalPlan::Scan { source, .. } => Ok(ctx.dialect.quote_table(source)),
         LogicalPlan::Join { left, right, on } => {
-            let l = from_join_or_scan(left.as_ref(), qualify)?;
-            let r = from_join_or_scan(right.as_ref(), qualify)?;
-            let on_clause = format_join_on(on, qualify).join(" AND ");
+            let l = from_join_or_scan(left.as_ref(), ctx)?;
+            let r = from_join_or_scan(right.as_ref(), ctx)?;
+            let on_clause = format_join_on(on, ctx).join(" AND ");
             Ok(format!("{l} INNER JOIN {r} ON {on_clause}"))
         }
         LogicalPlan::Filter { .. } => Err(EmitError::InvalidPlan(
@@ -138,19 +143,12 @@ fn from_join_or_scan(plan: &LogicalPlan, qualify: bool) -> Result<String, EmitEr
     }
 }
 
-fn quote_ident(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        name.to_string()
-    } else {
-        format!("\"{}\"", name.replace('"', "\"\""))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plan::expr::{AggFunc, Expr, Literal};
     use crate::plan::LogicalPlan;
+    use crate::sql_dialect::BigQuery;
 
     fn minimal_aggregate() -> LogicalPlan {
         LogicalPlan::Aggregate {
@@ -185,5 +183,38 @@ mod tests {
         assert!(sql.contains("WHERE id = 1"));
         assert!(sql.contains("GROUP BY id"));
         assert!(sql.contains("COUNT(*) AS row_count"));
+    }
+
+    #[test]
+    fn bigquery_uses_backtick_table_quoting() {
+        let sql = to_sql_with(&minimal_aggregate(), &BigQuery).expect("sql");
+        assert!(sql.contains("FROM `warehouse.public.fact_table`"), "{sql}");
+        // ANSI rendering is unchanged.
+        assert!(to_sql(&minimal_aggregate())
+            .unwrap()
+            .contains("FROM \"warehouse.public.fact_table\""));
+    }
+
+    #[test]
+    fn bigquery_renders_current_date_as_call() {
+        let plan = LogicalPlan::Aggregate {
+            input: Box::new(LogicalPlan::Scan {
+                source: "ds.t".into(),
+                dataset: "t".into(),
+                columns: vec!["d".into()],
+            }),
+            group_by: vec![],
+            aggregates: vec![crate::plan::NamedAggregate {
+                name: "today".into(),
+                expr: Expr::Agg {
+                    func: AggFunc::Max,
+                    distinct: false,
+                    arg: Some(Box::new(Expr::CurrentDate)),
+                },
+            }],
+        };
+        let sql = to_sql_with(&plan, &BigQuery).expect("sql");
+        assert!(sql.contains("MAX(CURRENT_DATE())"), "{sql}");
+        assert!(to_sql(&plan).unwrap().contains("MAX(CURRENT_DATE)"));
     }
 }

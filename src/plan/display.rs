@@ -2,8 +2,14 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use super::{format_expr, format_join_on};
+use super::{format_expr, format_join_on, SqlCtx};
 use super::{LogicalPlan, NamedAggregate};
+use crate::sql_dialect::Ansi;
+
+/// Debug display always renders ANSI SQL fragments.
+fn ctx(qualify: bool) -> SqlCtx<'static> {
+    SqlCtx { dialect: &Ansi, qualify }
+}
 
 /// Indented, multi-line plan text (use with `format!("{}", plan.display_indent())`).
 pub struct DisplayIndent<'a>(pub(super) &'a LogicalPlan);
@@ -38,13 +44,13 @@ fn write_node(f: &mut Formatter<'_>, plan: &LogicalPlan, depth: usize, qualify: 
             writeln!(f, "{pad}Scan: {source} (dataset={dataset}, cols={})", columns.len())
         }
         LogicalPlan::Join { left, right, on } => {
-            let on_s = format_join_on(on, qualify).join(" AND ");
+            let on_s = format_join_on(on, ctx(qualify)).join(" AND ");
             writeln!(f, "{pad}Join: inner on={on_s}")?;
             write_node(f, left, depth + 1, qualify)?;
             write_node(f, right, depth + 1, qualify)
         }
         LogicalPlan::Filter { input, predicate } => {
-            writeln!(f, "{pad}Filter: {}", format_expr(predicate, qualify))?;
+            writeln!(f, "{pad}Filter: {}", format_expr(predicate, ctx(qualify)))?;
             write_node(f, input, depth + 1, qualify)
         }
         LogicalPlan::Aggregate {
@@ -59,7 +65,7 @@ fn write_node(f: &mut Formatter<'_>, plan: &LogicalPlan, depth: usize, qualify: 
                     "[{}]",
                     group_by
                         .iter()
-                        .map(|e| format_expr(e, qualify))
+                        .map(|e| format_expr(e, ctx(qualify)))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -77,7 +83,7 @@ fn format_aggregates(aggregates: &[NamedAggregate], qualify: bool) -> String {
     }
     aggregates
         .iter()
-        .map(|a| format!("{}: {}", a.name, format_expr(&a.expr, qualify)))
+        .map(|a| format!("{}: {}", a.name, format_expr(&a.expr, ctx(qualify))))
         .collect::<Vec<_>>()
         .join(", ")
 }
