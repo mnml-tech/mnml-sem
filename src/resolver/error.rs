@@ -58,6 +58,20 @@ pub enum QueryError {
     #[error("column {column:?} is not in scope; available: {available}")]
     ColumnNotInScope { column: String, available: String },
 
+    /// The join repeats the rows this aggregate reads, so the result would be
+    /// larger than the truth. Refused rather than returned.
+    #[error(
+        "metric {metric:?} would be inflated: {agg} reads {dataset:?}, whose rows this join \
+         repeats once per matching row on the many side. Aggregate {dataset:?} in its own \
+         query, or use an aggregate that repeated rows do not change (MIN, MAX, or \
+         COUNT(DISTINCT ...))."
+    )]
+    FanOut {
+        metric: String,
+        dataset: String,
+        agg: String,
+    },
+
     /// You can only order by what the query selects.
     #[error("cannot order by {reference:?}: it is not selected; available: {available}")]
     OrderByNotSelected {

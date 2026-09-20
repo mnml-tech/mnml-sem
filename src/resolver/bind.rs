@@ -1,6 +1,6 @@
 //! Bind a [`SemanticQuery`](crate::query::SemanticQuery) against a [`CompiledModel`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::compiled::{CompiledDataset, CompiledField, CompiledMetric, CompiledModel, IssueTarget};
 use crate::model::Relationship;
@@ -47,6 +47,10 @@ pub struct BoundQuery {
     pub group_by: Vec<ResolvedField>,
     pub metrics: Vec<CompiledMetric>,
     pub filters: Vec<BoundFilter>,
+    /// Datasets whose rows the join repeats. Aggregating one of these with a
+    /// duplicate-sensitive function would inflate the result; see
+    /// [`fanned_datasets`].
+    pub fanned_datasets: BTreeSet<String>,
     /// Trailing clauses, resolved against the plan's output by the planner.
     pub order_by: Vec<crate::query::OrderBy>,
     pub limit: Option<u64>,
@@ -178,6 +182,8 @@ pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQu
         build_join_order(model, &required, &root)?
     };
 
+    let fanned = fanned_datasets(&root, &joins, &model.relationships);
+
     let mut sources: HashMap<String, String> = HashMap::new();
     for name in &required {
         let ds = dataset_by_name.get(name).unwrap();
@@ -192,10 +198,47 @@ pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQu
         group_by,
         metrics,
         filters,
+        fanned_datasets: fanned,
         order_by: spec.order_by.clone(),
         limit: spec.limit,
         offset: spec.offset,
     })
+}
+
+/// Datasets the join repeats rows of.
+///
+/// The core spec defines a relationship's `from` as the dataset on the **many**
+/// side and `to` as the one side, so this is declared rather than guessed —
+/// and `to_columns` naming the target's primary or unique key corroborates it.
+///
+/// Joining many→one leaves the many side one row per row and repeats the one
+/// side once per match. Joining one→many repeats everything already joined.
+/// An undeclared edge says nothing, so nothing is assumed.
+fn fanned_datasets(
+    root: &str,
+    joins: &[BoundJoin],
+    relationships: &[Relationship],
+) -> BTreeSet<String> {
+    let mut joined: Vec<String> = vec![root.to_string()];
+    let mut fanned: BTreeSet<String> = BTreeSet::new();
+
+    for step in joins {
+        let edge = relationships.iter().find(|r| {
+            (r.from == step.left_dataset && r.to == step.right_dataset)
+                || (r.from == step.right_dataset && r.to == step.left_dataset)
+        });
+        match edge {
+            // many → one: the one side is repeated.
+            Some(rel) if rel.to == step.right_dataset => {
+                fanned.insert(step.right_dataset.clone());
+            }
+            // one → many: every row already in the tree is repeated.
+            Some(_) => fanned.extend(joined.iter().cloned()),
+            None => {}
+        }
+        joined.push(step.right_dataset.clone());
+    }
+    fanned
 }
 
 fn parse_field_ref(s: &str) -> Result<(&str, &str), QueryError> {

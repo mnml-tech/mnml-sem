@@ -176,6 +176,8 @@ pub fn build_logical_plan(
         .map(|m| NamedExpr::new(&m.name, m.expr.clone()))
         .collect();
 
+    check_fan_out(&metrics, &bound.fanned_datasets)?;
+
     let Split {
         aggregates,
         projection,
@@ -336,6 +338,62 @@ fn check_expr(expr: &Expr, schema: &[SchemaColumn]) -> Result<(), QueryError> {
         check_expr(child, schema)?;
     }
     Ok(())
+}
+
+/// Refuse a metric the join would inflate.
+///
+/// A join repeats the rows of its one side, so a `SUM` over them counts each
+/// one once per matching row on the many side. The correct plan aggregates
+/// that side before joining, which this crate's IR cannot express yet — so
+/// rather than return a number that is quietly too large, say so.
+///
+/// `MIN`, `MAX` and any `DISTINCT` aggregate are unaffected by repeated rows
+/// and stay allowed.
+fn check_fan_out(
+    metrics: &[NamedExpr],
+    fanned: &std::collections::BTreeSet<String>,
+) -> Result<(), QueryError> {
+    if fanned.is_empty() {
+        return Ok(());
+    }
+    for metric in metrics {
+        if let Some(err) = first_inflated(&metric.expr, &metric.name, fanned) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn first_inflated(
+    expr: &Expr,
+    metric: &str,
+    fanned: &std::collections::BTreeSet<String>,
+) -> Option<QueryError> {
+    if let Expr::Agg {
+        func,
+        distinct,
+        args,
+    } = expr
+    {
+        // DISTINCT collapses the repeats, so it reads the same either way.
+        if !distinct && crate::catalog::def(*func).is_duplicate_sensitive() {
+            let touched: std::collections::BTreeSet<String> = args
+                .iter()
+                .flat_map(|a| a.referenced_datasets())
+                .filter(|d| fanned.contains(d))
+                .collect();
+            if let Some(dataset) = touched.into_iter().next() {
+                return Some(QueryError::FanOut {
+                    metric: metric.to_string(),
+                    dataset,
+                    agg: crate::catalog::def(*func).name_for_sql().to_string(),
+                });
+            }
+        }
+    }
+    expr.children()
+        .into_iter()
+        .find_map(|c| first_inflated(c, metric, fanned))
 }
 
 /// Metrics rearranged so every aggregate stands alone.

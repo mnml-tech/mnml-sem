@@ -58,7 +58,14 @@ pub const UNKNOWN_TYPE_ANCHOR: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FuncKind {
     Scalar,
-    Aggregate,
+    Aggregate {
+        /// Whether repeating an input row changes the result.
+        ///
+        /// A join duplicates the rows of its one side, so a `SUM` over them is
+        /// inflated while a `MIN` is not. Stating it here means adding an
+        /// aggregate has to answer the question.
+        duplicate_sensitive: bool,
+    },
 }
 
 /// How many arguments a function accepts.
@@ -215,7 +222,18 @@ pub struct FuncDef {
 
 impl FuncDef {
     pub fn is_aggregate(&self) -> bool {
-        matches!(self.kind, FuncKind::Aggregate)
+        matches!(self.kind, FuncKind::Aggregate { .. })
+    }
+
+    /// Whether duplicated input rows would change this aggregate's result.
+    /// Scalars are unaffected.
+    pub fn is_duplicate_sensitive(&self) -> bool {
+        matches!(
+            self.kind,
+            FuncKind::Aggregate {
+                duplicate_sensitive: true
+            }
+        )
     }
 
     /// The SQL call name, for functions rendered as `NAME(args)`.
@@ -239,7 +257,9 @@ pub fn by_sql_name(name: &str) -> Option<&'static FuncDef> {
 pub const CATALOG: &[FuncDef] = &[
     FuncDef {
         func: Func::Sum,
-        kind: FuncKind::Aggregate,
+        kind: FuncKind::Aggregate {
+            duplicate_sensitive: true,
+        },
         arity: Arity::Exact(1),
         group: AGGREGATE,
         anchor: 1,
@@ -250,7 +270,9 @@ pub const CATALOG: &[FuncDef] = &[
     },
     FuncDef {
         func: Func::Avg,
-        kind: FuncKind::Aggregate,
+        kind: FuncKind::Aggregate {
+            duplicate_sensitive: true,
+        },
         arity: Arity::Exact(1),
         group: AGGREGATE,
         anchor: 2,
@@ -261,7 +283,9 @@ pub const CATALOG: &[FuncDef] = &[
     },
     FuncDef {
         func: Func::Count,
-        kind: FuncKind::Aggregate,
+        kind: FuncKind::Aggregate {
+            duplicate_sensitive: true,
+        },
         arity: Arity::AtLeast(0),
         group: AGGREGATE,
         anchor: 3,
@@ -272,7 +296,9 @@ pub const CATALOG: &[FuncDef] = &[
     },
     FuncDef {
         func: Func::Min,
-        kind: FuncKind::Aggregate,
+        kind: FuncKind::Aggregate {
+            duplicate_sensitive: false,
+        },
         arity: Arity::Exact(1),
         group: AGGREGATE,
         anchor: 5,
@@ -283,7 +309,9 @@ pub const CATALOG: &[FuncDef] = &[
     },
     FuncDef {
         func: Func::Max,
-        kind: FuncKind::Aggregate,
+        kind: FuncKind::Aggregate {
+            duplicate_sensitive: false,
+        },
         arity: Arity::Exact(1),
         group: AGGREGATE,
         anchor: 6,

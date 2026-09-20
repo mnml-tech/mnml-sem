@@ -1510,3 +1510,132 @@ fn a_query_without_ordering_is_unchanged() {
         "no Sort or Fetch should appear: {plan:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fan-out: refuse a metric the join would inflate, rather than return it.
+// ---------------------------------------------------------------------------
+
+/// `orders` is the many side, `dim` the one side, so the join repeats each
+/// `dim` row once per matching order.
+const FAN_OUT_MODEL: &str = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: orders
+    source: s.orders
+    fields:
+      - name: amount
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: amount }]
+      - name: dim_id
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: dim_id }]
+  - name: dim
+    source: s.dim
+    primary_key: [id]
+    fields:
+      - name: id
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: id }]
+      - name: headcount
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: headcount }]
+relationships:
+  - name: orders_to_dim
+    from: orders
+    to: dim
+    from_columns: [dim_id]
+    to_columns: [id]
+metrics:
+  - name: inflated
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount) / SUM(dim.headcount)" }]
+  - name: safe_distinct
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount) / COUNT(DISTINCT dim.id)" }]
+  - name: safe_max
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "MAX(dim.headcount)" }]
+  - name: safe_many_side
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }]
+"#;
+
+fn fan_out_plan(metric: &str) -> Result<LogicalPlan, QueryError> {
+    let doc = from_yaml_str(FAN_OUT_MODEL).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+    let spec = SemanticQuery {
+        metrics: vec![metric.to_string()],
+        dataset: Some("orders".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    build_logical_plan(&bound, &model)
+}
+
+/// The bug this exists for: summing the one side counts each of its rows once
+/// per matching row on the many side.
+#[test]
+fn summing_the_one_side_of_a_join_is_refused() {
+    let err = fan_out_plan("inflated").expect_err("SUM over the repeated side is inflated");
+    let msg = err.to_string();
+    assert!(msg.contains("would be inflated"), "{msg}");
+    assert!(msg.contains("\"dim\""), "should name the dataset: {msg}");
+    assert!(msg.contains("SUM"), "should name the aggregate: {msg}");
+    assert!(
+        msg.contains("COUNT(DISTINCT"),
+        "should say what would work: {msg}"
+    );
+}
+
+/// Repeated rows do not change these, so they stay allowed.
+#[test]
+fn duplicate_insensitive_aggregates_are_allowed() {
+    fan_out_plan("safe_distinct").expect("COUNT(DISTINCT ...) collapses the repeats");
+    fan_out_plan("safe_max").expect("MAX is unchanged by repeated rows");
+}
+
+/// The many side is not repeated, so aggregating it is fine.
+#[test]
+fn aggregating_the_many_side_is_unaffected() {
+    fan_out_plan("safe_many_side").expect("orders rows appear once each");
+}
+
+/// Nothing is repeated without a join, so nothing is refused.
+#[test]
+fn a_single_dataset_query_never_fans_out() {
+    let doc = from_yaml_str(FAN_OUT_MODEL).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+    let spec = SemanticQuery {
+        metrics: vec!["safe_many_side".into()],
+        group_by: vec!["orders.dim_id".into()],
+        dataset: Some("orders".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    assert!(
+        bound.fanned_datasets.is_empty(),
+        "{:?}",
+        bound.fanned_datasets
+    );
+    build_logical_plan(&bound, &model).expect("plan");
+}
+
+/// The binder names which side the join repeats, per the spec's reading of
+/// `from` as the many side and `to` as the one side.
+#[test]
+fn the_binder_identifies_the_repeated_side() {
+    let doc = from_yaml_str(FAN_OUT_MODEL).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+    let spec = SemanticQuery {
+        metrics: vec!["safe_distinct".into()],
+        dataset: Some("orders".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    assert_eq!(
+        bound.fanned_datasets.iter().cloned().collect::<Vec<_>>(),
+        vec!["dim".to_string()],
+        "the one side is the repeated one"
+    );
+}
