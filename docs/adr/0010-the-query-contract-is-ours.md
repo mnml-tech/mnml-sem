@@ -35,5 +35,5 @@ Two rules keep it from drifting into the model's territory:
 - It is not interoperable. A query written against this crate is not portable to
   another Ossie tool, and should not be presented as if it were.
 - If the spec later defines a query format, this becomes a compatibility problem
-  to solve deliberately, and this ADR is superseded rather than quietly amended.
+  to solve deliberately rather than a detail to absorb.
 

@@ -1,6 +1,6 @@
 # NNNN. Title
 
-- Status: Proposed | Accepted | Superseded by [ADR-NNNN](NNNN-title.md)
+- Status: Proposed | Accepted
 - Date: YYYY-MM-DD
 
 ## Context
