@@ -53,6 +53,11 @@ pub enum QueryError {
     #[error("invalid filter on {field:?}: {reason}")]
     InvalidFilter { field: String, reason: String },
 
+    /// An expression referenced a column the plan does not produce. Caught
+    /// while planning, where the query is still in hand.
+    #[error("column {column:?} is not in scope; available: {available}")]
+    ColumnNotInScope { column: String, available: String },
+
     /// Parsed as SQL, but outside the Ossie expression profile (or not yet
     /// implemented here) — e.g. a subquery or a window function.
     #[error("unsupported expression: {0}")]

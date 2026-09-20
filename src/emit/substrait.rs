@@ -23,37 +23,24 @@ use crate::catalog::{self, Func};
 use crate::emit::EmitError;
 use crate::model::DataType;
 use crate::plan::expr::{ColumnRef, Expr, JoinKey, Literal};
-use crate::plan::{LogicalPlan, NamedExpr, ScanColumn};
+use crate::plan::{LogicalPlan, NamedExpr, ScanColumn, SchemaColumn, find_column};
 
 #[derive(Debug, Clone)]
+/// The columns a field reference resolves against, taken from the plan's own
+/// [`LogicalPlan::output_schema`] so this cannot disagree with the planner.
 struct SchemaContext {
-    columns: Vec<(String, String)>,
+    columns: Vec<SchemaColumn>,
 }
 
 impl SchemaContext {
-    fn new() -> Self {
+    fn of(plan: &LogicalPlan) -> Self {
         Self {
-            columns: Vec::new(),
+            columns: plan.output_schema(),
         }
     }
 
-    fn add_scan(&mut self, alias: &str, columns: &[ScanColumn]) {
-        for col in columns {
-            self.columns.push((alias.to_string(), col.name.clone()));
-        }
-    }
-
-    fn merge(&mut self, other: SchemaContext) {
-        self.columns.extend(other.columns);
-    }
-
-    fn find_column(&self, dataset: &str, sql: &str) -> Option<usize> {
-        if dataset.is_empty() {
-            return self.columns.iter().position(|(_, c)| c == sql);
-        }
-        self.columns
-            .iter()
-            .position(|(d, c)| d == dataset && c == sql)
+    fn find_column(&self, dataset: &str, column: &str) -> Option<usize> {
+        find_column(&self.columns, dataset, column)
     }
 
     fn len(&self) -> usize {
@@ -95,9 +82,9 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
         unreachable!("matched above");
     };
 
-    let mut ctx = SchemaContext::new();
-    let input_rel = emit_rel(input, &mut ctx)?;
-    let rel = emit_aggregate_rel(input_rel, group_by, aggregates, &mut ctx)?;
+    let input_rel = emit_rel(input)?;
+    let input_ctx = SchemaContext::of(input);
+    let rel = emit_aggregate_rel(input_rel, group_by, aggregates, &input_ctx)?;
 
     let (rel, output_names) = match projection {
         None => {
@@ -106,10 +93,9 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
             (rel, names)
         }
         Some(exprs) => {
-            let rel = emit_project_rel(rel, group_by.len(), exprs, &mut ctx)?;
-            let mut names: Vec<String> = group_by.iter().map(output_name_for_expr).collect();
-            names.extend(exprs.iter().map(|e| e.name.clone()));
-            (rel, names)
+            let agg_ctx = SchemaContext::of(aggregate);
+            let rel = emit_project_rel(rel, exprs, &agg_ctx)?;
+            (rel, exprs.iter().map(|e| e.name.clone()).collect())
         }
     };
 
@@ -140,15 +126,15 @@ fn output_name_for_expr(expr: &Expr) -> String {
     }
 }
 
-fn emit_rel(plan: &LogicalPlan, ctx: &mut SchemaContext) -> Result<proto::Rel, EmitError> {
+fn emit_rel(plan: &LogicalPlan) -> Result<proto::Rel, EmitError> {
     match plan {
         LogicalPlan::Scan {
             source,
-            dataset,
+            dataset: _,
             columns,
-        } => emit_scan(source, dataset, columns, ctx),
-        LogicalPlan::Join { left, right, on } => emit_join(left, right, on, ctx),
-        LogicalPlan::Filter { input, predicate } => emit_filter(input, predicate, ctx),
+        } => emit_scan(source, plan, columns),
+        LogicalPlan::Join { left, right, on } => emit_join(left, right, on),
+        LogicalPlan::Filter { input, predicate } => emit_filter(input, predicate),
         LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(EmitError::InvalidPlan(
             "unexpected nested Aggregate in input rel",
         )),
@@ -157,12 +143,9 @@ fn emit_rel(plan: &LogicalPlan, ctx: &mut SchemaContext) -> Result<proto::Rel, E
 
 fn emit_scan(
     source: &str,
-    dataset: &str,
+    _plan: &LogicalPlan,
     columns: &[ScanColumn],
-    ctx: &mut SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
-    ctx.add_scan(dataset, columns);
-
     let types: Vec<proto::Type> = columns.iter().map(|c| substrait_type(c.datatype)).collect();
     let base_schema = proto::NamedStruct {
         names: columns.iter().map(|c| c.name.clone()).collect(),
@@ -191,17 +174,15 @@ fn emit_join(
     left: &LogicalPlan,
     right: &LogicalPlan,
     on: &[JoinKey],
-    ctx: &mut SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
-    let mut left_ctx = SchemaContext::new();
-    let left_rel = emit_rel(left, &mut left_ctx)?;
+    let left_rel = emit_rel(left)?;
+    let right_rel = emit_rel(right)?;
 
-    let mut right_ctx = SchemaContext::new();
-    let right_rel = emit_rel(right, &mut right_ctx)?;
-
-    ctx.merge(left_ctx.clone());
-    let right_offset = ctx.len();
-    ctx.merge(right_ctx.clone());
+    let left_ctx = SchemaContext::of(left);
+    let right_ctx = SchemaContext::of(right);
+    // A join's columns are the left's followed by the right's, so a right
+    // column's index is offset by the left's width.
+    let right_offset = left_ctx.len();
 
     if on.is_empty() {
         return Err(EmitError::InvalidPlan("join with no keys"));
@@ -248,13 +229,9 @@ fn join_key_expr(
     ))
 }
 
-fn emit_filter(
-    input: &LogicalPlan,
-    predicate: &Expr,
-    ctx: &mut SchemaContext,
-) -> Result<proto::Rel, EmitError> {
-    let input_rel = emit_rel(input, ctx)?;
-    let condition = emit_expr(predicate, ctx)?;
+fn emit_filter(input: &LogicalPlan, predicate: &Expr) -> Result<proto::Rel, EmitError> {
+    let input_rel = emit_rel(input)?;
+    let condition = emit_expr(predicate, &SchemaContext::of(input))?;
     Ok(proto::Rel {
         rel_type: Some(RelType::Filter(Box::new(proto::FilterRel {
             input: Some(Box::new(input_rel)),
@@ -268,7 +245,7 @@ fn emit_aggregate_rel(
     input: proto::Rel,
     group_by: &[Expr],
     aggregates: &[NamedExpr],
-    ctx: &mut SchemaContext,
+    ctx: &SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
     let grouping_expressions: Vec<proto::Expression> = group_by
         .iter()
@@ -290,21 +267,6 @@ fn emit_aggregate_rel(
         .map(|a| emit_measure(a, ctx))
         .collect::<Result<_, _>>()?;
 
-    // The AggregateRel emits one column per grouping followed by one per
-    // measure. Every grouping must take a slot here, named or not, or the
-    // measure indices below it shift.
-    let mut new_ctx = SchemaContext::new();
-    for (i, e) in group_by.iter().enumerate() {
-        match e {
-            Expr::Column(c) => new_ctx.columns.push((c.dataset.clone(), c.column.clone())),
-            _ => new_ctx.columns.push((String::new(), format!("__group{i}"))),
-        }
-    }
-    for a in aggregates {
-        new_ctx.columns.push((String::new(), a.name.clone()));
-    }
-    *ctx = new_ctx;
-
     Ok(proto::Rel {
         rel_type: Some(RelType::Aggregate(Box::new(proto::AggregateRel {
             input: Some(Box::new(input)),
@@ -320,9 +282,8 @@ fn emit_aggregate_rel(
 /// column per metric.
 fn emit_project_rel(
     input: proto::Rel,
-    group_count: usize,
     projections: &[NamedExpr],
-    ctx: &mut SchemaContext,
+    ctx: &SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
     let expressions: Vec<proto::Expression> = projections
         .iter()
@@ -330,20 +291,12 @@ fn emit_project_rel(
         .collect::<Result<_, _>>()?;
 
     // ProjectRel appends its expressions to the input columns, so the emit
-    // mapping selects the groupings plus the appended metrics, dropping the
-    // intermediate measures.
+    // mapping selects only the appended ones, dropping the intermediate
+    // measures the planner lifted out.
     let input_width = ctx.len();
-    let mut output_mapping: Vec<i32> = (0..group_count as i32).collect();
-    output_mapping.extend((0..expressions.len()).map(|i| (input_width + i) as i32));
-
-    let mut new_ctx = SchemaContext::new();
-    new_ctx
-        .columns
-        .extend(ctx.columns.iter().take(group_count).cloned());
-    for p in projections {
-        new_ctx.columns.push((String::new(), p.name.clone()));
-    }
-    *ctx = new_ctx;
+    let output_mapping: Vec<i32> = (0..expressions.len())
+        .map(|i| (input_width + i) as i32)
+        .collect();
 
     Ok(proto::Rel {
         rel_type: Some(RelType::Project(Box::new(proto::ProjectRel {

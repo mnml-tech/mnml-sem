@@ -4,7 +4,9 @@
 //! so this module only assembles plan nodes.
 
 use crate::compiled::CompiledModel;
-use crate::plan::{ColumnRef, Expr, Literal, LogicalPlan, NamedExpr, ScanColumn};
+use crate::plan::{
+    ColumnRef, Expr, Literal, LogicalPlan, NamedExpr, ScanColumn, SchemaColumn, find_column,
+};
 use crate::resolver::{BoundQuery, QueryError, ResolvedField};
 
 /// A group-by or filter field, qualified by its dataset.
@@ -179,17 +181,97 @@ pub fn build_logical_plan(
 
     let aggregate = LogicalPlan::Aggregate {
         input: Box::new(after_filter),
-        group_by,
+        group_by: group_by.clone(),
         aggregates,
     };
 
-    Ok(match projection {
+    let plan = match projection {
         None => aggregate,
-        Some(exprs) => LogicalPlan::Project {
-            input: Box::new(aggregate),
-            exprs,
-        },
-    })
+        Some(metric_exprs) => {
+            // Grouping columns pass through, but the node lists them so its
+            // output schema is readable from the node alone.
+            let mut exprs: Vec<NamedExpr> = group_by
+                .iter()
+                .map(|e| NamedExpr::new(output_name(e), e.clone()))
+                .collect();
+            exprs.extend(metric_exprs);
+            LogicalPlan::Project {
+                input: Box::new(aggregate),
+                exprs,
+            }
+        }
+    };
+
+    check_plan_columns(&plan)?;
+    Ok(plan)
+}
+
+/// Name a pass-through expression gets as an output column.
+fn output_name(expr: &Expr) -> String {
+    match expr {
+        Expr::Column(c) if !c.dataset.is_empty() => format!("{}.{}", c.dataset, c.column),
+        Expr::Column(c) => c.column.clone(),
+        _ => "expr".to_string(),
+    }
+}
+
+/// Verify every column reference resolves against the schema of the node's
+/// input, so emission cannot fail on a lookup.
+///
+/// [`build_logical_plan`] runs this on the plans it produces; it is public so
+/// a hand-built plan can be checked before emission.
+pub fn check_plan_columns(plan: &LogicalPlan) -> Result<(), QueryError> {
+    let (input, exprs): (&LogicalPlan, Vec<&Expr>) = match plan {
+        LogicalPlan::Scan { .. } => return Ok(()),
+        LogicalPlan::Join { left, right, .. } => {
+            check_plan_columns(left)?;
+            return check_plan_columns(right);
+        }
+        LogicalPlan::Filter { input, predicate } => (input, vec![predicate]),
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            aggregates,
+        } => (
+            input,
+            group_by
+                .iter()
+                .chain(aggregates.iter().map(|a| &a.expr))
+                .collect(),
+        ),
+        LogicalPlan::Project { input, exprs } => (input, exprs.iter().map(|e| &e.expr).collect()),
+    };
+
+    let schema = input.output_schema();
+    for expr in exprs {
+        check_expr(expr, &schema)?;
+    }
+    check_plan_columns(input)
+}
+
+fn check_expr(expr: &Expr, schema: &[SchemaColumn]) -> Result<(), QueryError> {
+    if let Expr::Column(c) = expr {
+        if find_column(schema, &c.dataset, &c.column).is_none() {
+            return Err(QueryError::ColumnNotInScope {
+                column: output_name(expr),
+                available: schema
+                    .iter()
+                    .map(|(d, n)| {
+                        if d.is_empty() {
+                            n.clone()
+                        } else {
+                            format!("{d}.{n}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        }
+    }
+    for child in expr.children() {
+        check_expr(child, schema)?;
+    }
+    Ok(())
 }
 
 /// Metrics rearranged so every aggregate stands alone.

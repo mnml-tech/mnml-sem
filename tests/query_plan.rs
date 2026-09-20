@@ -463,14 +463,18 @@ fn composite_metric_emits_project_over_aggregate() {
     let Some(RelType::Project(project)) = root.input.expect("input").rel_type else {
         panic!("expected a ProjectRel above the aggregate");
     };
-    assert_eq!(project.expressions.len(), 1, "one expression per metric");
+    // One expression per output column: the grouping passes through
+    // explicitly, then the metric.
+    assert_eq!(project.expressions.len(), 2);
 
     let emit = match project.common.expect("common").emit_kind.expect("emit_kind") {
         substrait::proto::rel_common::EmitKind::Emit(e) => e.output_mapping,
         other => panic!("expected an explicit emit mapping, got {other:?}"),
     };
-    // 1 grouping + 2 measures = 3 input columns; the metric lands at index 3.
-    assert_eq!(emit, vec![0, 3]);
+    // 1 grouping + 2 measures = 3 input columns, and ProjectRel appends its
+    // expressions after them, so the outputs are 3 and 4 — the intermediate
+    // measures are dropped.
+    assert_eq!(emit, vec![3, 4]);
 
     let Some(RelType::Aggregate(agg)) = project.input.expect("project input").rel_type else {
         panic!("expected an AggregateRel under the projection");
@@ -997,4 +1001,77 @@ fn scan_schema_does_not_default_everything_to_string() {
             .all(|t| matches!(t.kind, Some(Kind::UserDefined(_)))),
         "undeclared columns must be `unknown`, not String"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Column scope: a planned query cannot fail emission on a lookup.
+// ---------------------------------------------------------------------------
+
+/// `output_schema` is the one definition of what a node produces, and the
+/// Substrait emitter resolves field references against it.
+#[test]
+fn output_schema_describes_each_node() {
+    let plan = steelwheels_plan(&["avg_unit_price"], &["dates.year_id"]);
+
+    let LogicalPlan::Project { input, .. } = &plan else {
+        panic!("expected a projection");
+    };
+    let aggregate = input.as_ref();
+
+    // Aggregate: one column per grouping, then one per measure.
+    let agg_schema = aggregate.output_schema();
+    assert_eq!(agg_schema.len(), 3, "1 grouping + 2 measures: {agg_schema:?}");
+    assert_eq!(agg_schema[0], ("dates".into(), "year_id".into()));
+    assert!(agg_schema[1].1.starts_with("__agg"), "{agg_schema:?}");
+
+    // Project: exactly its named outputs, measures dropped.
+    let out = plan.output_schema();
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert_eq!(out[1], (String::new(), "avg_unit_price".into()));
+    assert!(!out.iter().any(|(_, n)| n.starts_with("__agg")));
+
+    // The join under it concatenates its children.
+    let LogicalPlan::Aggregate { input, .. } = aggregate else {
+        panic!("expected an aggregate");
+    };
+    let join = input.as_ref();
+    let LogicalPlan::Join { left, right, .. } = join else {
+        panic!("expected a join");
+    };
+    assert_eq!(
+        join.output_schema().len(),
+        left.output_schema().len() + right.output_schema().len()
+    );
+}
+
+/// A reference the plan cannot produce is caught while planning, with the
+/// available columns listed — not at emission time.
+#[test]
+fn out_of_scope_columns_fail_at_plan_time() {
+    use ossie_substrait::plan::{NamedExpr, ScanColumn};
+
+    let scan = LogicalPlan::Scan {
+        source: "s.t".into(),
+        dataset: "t".into(),
+        columns: vec![ScanColumn::new("id", None)],
+    };
+    let plan = LogicalPlan::Aggregate {
+        input: Box::new(scan),
+        group_by: vec![Expr::column("t", "nope")],
+        aggregates: vec![NamedExpr::new(
+            "n",
+            Expr::Agg {
+                func: Func::Count,
+                distinct: false,
+                args: vec![],
+            },
+        )],
+    };
+
+    let err = ossie_substrait::planner::check_plan_columns(&plan)
+        .expect_err("a grouping on an unknown column must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("not in scope"), "{msg}");
+    assert!(msg.contains("t.nope"), "{msg}");
+    assert!(msg.contains("id"), "the available columns should be listed: {msg}");
 }

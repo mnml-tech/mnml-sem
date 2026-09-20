@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use crate::emit::EmitError;
-use crate::plan::{format_expr, format_join_on, SqlCtx};
 use crate::plan::{Expr, LogicalPlan, NamedExpr};
+use crate::plan::{SqlCtx, format_expr, format_join_on};
 use crate::sql_dialect::{Ansi, SqlDialect};
 
 /// Build a single ANSI `SELECT` statement for the plan tree.
@@ -22,7 +22,9 @@ pub fn to_sql(plan: &LogicalPlan) -> Result<String, EmitError> {
 pub fn to_sql_with(plan: &LogicalPlan, dialect: &dyn SqlDialect) -> Result<String, EmitError> {
     let (aggregate, projection) = match plan {
         LogicalPlan::Aggregate { .. } => (plan, None),
-        LogicalPlan::Project { input, exprs } if matches!(**input, LogicalPlan::Aggregate { .. }) => {
+        LogicalPlan::Project { input, exprs }
+            if matches!(**input, LogicalPlan::Aggregate { .. }) =>
+        {
             (input.as_ref(), Some(exprs.as_slice()))
         }
         _ => {
@@ -47,7 +49,13 @@ pub fn to_sql_with(plan: &LogicalPlan, dialect: &dyn SqlDialect) -> Result<Strin
     };
 
     let outputs: Vec<NamedExpr> = match projection {
-        None => aggregates.clone(),
+        // No projection: the grouping columns are not named outputs, so they
+        // are rendered separately from the measures.
+        None => group_by
+            .iter()
+            .map(|e| NamedExpr::new(String::new(), e.clone()))
+            .chain(aggregates.iter().cloned())
+            .collect(),
         Some(exprs) => {
             let measures: HashMap<&str, &Expr> = aggregates
                 .iter()
@@ -92,15 +100,19 @@ fn emit_aggregate_root(
 ) -> Result<String, EmitError> {
     let (from_sql, where_sql) = from_and_where(input, ctx)?;
 
-    let mut select_items: Vec<String> = group_by.iter().map(|e| format_expr(e, ctx)).collect();
-
-    for o in outputs {
-        select_items.push(format!(
-            "{} AS {}",
-            format_expr(&o.expr, ctx),
-            ctx.dialect.quote_ident(&o.name)
-        ));
-    }
+    let select_items: Vec<String> = outputs
+        .iter()
+        .map(|o| {
+            let sql = format_expr(&o.expr, ctx);
+            // Alias only when it says something the expression does not: a
+            // grouping column selected as itself needs no `AS`.
+            if o.name.is_empty() || alias_is_redundant(&o.expr, &o.name) {
+                sql
+            } else {
+                format!("{sql} AS {}", ctx.dialect.quote_ident(&o.name))
+            }
+        })
+        .collect();
 
     if select_items.is_empty() {
         return Err(EmitError::InvalidPlan("empty SELECT"));
@@ -126,6 +138,15 @@ fn emit_aggregate_root(
     }
 
     Ok(sql)
+}
+
+/// Whether `name` merely restates what `expr` already produces.
+fn alias_is_redundant(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Column(c) if c.dataset.is_empty() => c.column == name,
+        Expr::Column(c) => name == format!("{}.{}", c.dataset, c.column),
+        _ => false,
+    }
 }
 
 fn from_and_where(plan: &LogicalPlan, ctx: SqlCtx) -> Result<(String, Option<String>), EmitError> {
@@ -178,12 +199,12 @@ fn from_join_or_scan(plan: &LogicalPlan, ctx: SqlCtx) -> Result<String, EmitErro
             let on_clause = format_join_on(on, ctx).join(" AND ");
             Ok(format!("{l} INNER JOIN {r} ON {on_clause}"))
         }
-        LogicalPlan::Filter { .. } => Err(EmitError::InvalidPlan(
-            "Filter must be peeled before FROM",
+        LogicalPlan::Filter { .. } => {
+            Err(EmitError::InvalidPlan("Filter must be peeled before FROM"))
+        }
+        LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(EmitError::Unsupported(
+            "nested Aggregate/Project under FROM",
         )),
-        LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(
-            EmitError::Unsupported("nested Aggregate/Project under FROM"),
-        ),
     }
 }
 
@@ -236,9 +257,11 @@ mod tests {
         let sql = to_sql_with(&minimal_aggregate(), &BigQuery).expect("sql");
         assert!(sql.contains("FROM `warehouse.public.fact_table`"), "{sql}");
         // ANSI treats the same source as a qualified name, part by part.
-        assert!(to_sql(&minimal_aggregate())
-            .unwrap()
-            .contains("FROM warehouse.public.fact_table"));
+        assert!(
+            to_sql(&minimal_aggregate())
+                .unwrap()
+                .contains("FROM warehouse.public.fact_table")
+        );
     }
 
     #[test]

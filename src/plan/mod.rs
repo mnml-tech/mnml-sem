@@ -9,7 +9,7 @@ use crate::model::{DataType, Dialect, Expression};
 
 pub use display::DisplayIndent;
 pub use expr::{ColumnRef, Expr, JoinKey, Literal};
-pub use sql_format::{format_column, format_expr, format_join_on, SqlCtx};
+pub use sql_format::{SqlCtx, format_column, format_expr, format_join_on};
 
 /// Root logical plan node (scan / join → optional filter → aggregate).
 #[derive(Debug, Clone)]
@@ -45,9 +45,76 @@ pub enum LogicalPlan {
     /// The aggregates become measures and this recombines them.
     Project {
         input: Box<LogicalPlan>,
-        /// Output columns, in order. Pass-through columns are explicit.
+        /// Every output column, in order — including grouping columns that
+        /// pass through unchanged.
         exprs: Vec<NamedExpr>,
     },
+}
+
+/// A column produced by a plan node: its dataset (empty when the node
+/// synthesized it) and its name.
+pub type SchemaColumn = (String, String);
+
+impl LogicalPlan {
+    /// The columns this node produces, in order.
+    ///
+    /// This is the one definition of a node's output. The planner checks
+    /// expressions against it and the Substrait emitter resolves field
+    /// references with it, so the two cannot drift.
+    pub fn output_schema(&self) -> Vec<SchemaColumn> {
+        match self {
+            LogicalPlan::Scan {
+                dataset, columns, ..
+            } => columns
+                .iter()
+                .map(|c| (dataset.clone(), c.name.clone()))
+                .collect(),
+            LogicalPlan::Join { left, right, .. } => {
+                let mut out = left.output_schema();
+                out.extend(right.output_schema());
+                out
+            }
+            LogicalPlan::Filter { input, .. } => input.output_schema(),
+            LogicalPlan::Aggregate {
+                group_by,
+                aggregates,
+                ..
+            } => {
+                // One output per grouping, then one per measure. A grouping
+                // that is not a plain column still takes a slot, or every
+                // measure index below it shifts.
+                let mut out: Vec<SchemaColumn> = group_by
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| match e {
+                        Expr::Column(c) => (c.dataset.clone(), c.column.clone()),
+                        _ => (String::new(), format!("__group{i}")),
+                    })
+                    .collect();
+                out.extend(aggregates.iter().map(|a| (String::new(), a.name.clone())));
+                out
+            }
+            LogicalPlan::Project { exprs, .. } => exprs
+                .iter()
+                .map(|e| match &e.expr {
+                    // A pass-through column keeps its identity.
+                    Expr::Column(c) => (c.dataset.clone(), c.column.clone()),
+                    _ => (String::new(), e.name.clone()),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Position of `(dataset, column)` in a schema.
+///
+/// An empty `dataset` matches on column name alone, which is how a
+/// single-source query refers to its columns.
+pub fn find_column(schema: &[SchemaColumn], dataset: &str, column: &str) -> Option<usize> {
+    if dataset.is_empty() {
+        return schema.iter().position(|(_, c)| c == column);
+    }
+    schema.iter().position(|(d, c)| d == dataset && c == column)
 }
 
 /// A column exposed by a [`LogicalPlan::Scan`].

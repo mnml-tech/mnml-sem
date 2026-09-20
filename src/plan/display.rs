@@ -2,13 +2,16 @@
 
 use std::fmt::{self, Display, Formatter};
 
-use super::{format_expr, format_join_on, SqlCtx};
 use super::{LogicalPlan, NamedExpr};
+use super::{SqlCtx, format_expr, format_join_on};
 use crate::sql_dialect::Ansi;
 
 /// Debug display always renders ANSI SQL fragments.
 fn ctx(qualify: bool) -> SqlCtx<'static> {
-    SqlCtx { dialect: &Ansi, qualify }
+    SqlCtx {
+        dialect: &Ansi,
+        qualify,
+    }
 }
 
 /// Indented, multi-line plan text (use with `format!("{}", plan.display_indent())`).
@@ -33,7 +36,12 @@ impl Display for LogicalPlan {
     }
 }
 
-fn write_node(f: &mut Formatter<'_>, plan: &LogicalPlan, depth: usize, qualify: bool) -> fmt::Result {
+fn write_node(
+    f: &mut Formatter<'_>,
+    plan: &LogicalPlan,
+    depth: usize,
+    qualify: bool,
+) -> fmt::Result {
     let pad = "  ".repeat(depth);
     match plan {
         LogicalPlan::Scan {
@@ -41,7 +49,11 @@ fn write_node(f: &mut Formatter<'_>, plan: &LogicalPlan, depth: usize, qualify: 
             dataset,
             columns,
         } => {
-            writeln!(f, "{pad}Scan: {source} (dataset={dataset}, cols={})", columns.len())
+            writeln!(
+                f,
+                "{pad}Scan: {source} (dataset={dataset}, cols={})",
+                columns.len()
+            )
         }
         LogicalPlan::Join { left, right, on } => {
             let on_s = format_join_on(on, ctx(qualify)).join(" AND ");
