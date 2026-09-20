@@ -4,7 +4,14 @@ use crate::error::Error;
 use crate::model::{Expression, OSSIE_SPEC_VERSION, OssieDocument};
 use std::collections::{HashMap, HashSet};
 
-/// Validate an [`OssieDocument`] (version, uniqueness, references, expression shape).
+/// Structural checks on a document: spec version, name uniqueness, and
+/// relationship references.
+///
+/// This is the **subset** that needs no expression compilation. It cannot tell
+/// you whether an expression is valid, because that needs the model as context.
+/// [`CompiledModel::compile`](crate::compiled::CompiledModel::compile) runs
+/// these checks and then compiles every expression; prefer it for loading a
+/// model.
 pub fn validate(doc: &OssieDocument) -> Result<(), Error> {
     let mut issues = Vec::new();
 

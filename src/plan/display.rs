@@ -3,7 +3,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use super::{format_expr, format_join_on, SqlCtx};
-use super::{LogicalPlan, NamedAggregate};
+use super::{LogicalPlan, NamedExpr};
 use crate::sql_dialect::Ansi;
 
 /// Debug display always renders ANSI SQL fragments.
@@ -74,10 +74,19 @@ fn write_node(f: &mut Formatter<'_>, plan: &LogicalPlan, depth: usize, qualify: 
             writeln!(f, "{pad}Aggregate: groupBy={gb}, aggr=[{ag}]")?;
             write_node(f, input, depth + 1, qualify)
         }
+        LogicalPlan::Project { input, exprs } => {
+            let cols = exprs
+                .iter()
+                .map(|e| format!("{}={}", e.name, format_expr(&e.expr, ctx(qualify))))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(f, "{pad}Project: [{cols}]")?;
+            write_node(f, input, depth + 1, qualify)
+        }
     }
 }
 
-fn format_aggregates(aggregates: &[NamedAggregate], qualify: bool) -> String {
+fn format_aggregates(aggregates: &[NamedExpr], qualify: bool) -> String {
     if aggregates.is_empty() {
         return String::new();
     }
@@ -92,7 +101,7 @@ fn format_aggregates(aggregates: &[NamedAggregate], qualify: bool) -> String {
 mod tests {
     use crate::catalog::Func;
     use crate::plan::expr::Expr;
-    use crate::plan::{LogicalPlan, NamedAggregate};
+    use crate::plan::{LogicalPlan, NamedExpr};
 
     #[test]
     fn display_indent_matches_datafusion_style_tree() {
@@ -110,7 +119,7 @@ mod tests {
                 ),
             }),
             group_by: vec![Expr::column("", "id")],
-            aggregates: vec![NamedAggregate {
+            aggregates: vec![NamedExpr {
                 name: "row_count".into(),
                 expr: Expr::Agg {
                     func: Func::Count,

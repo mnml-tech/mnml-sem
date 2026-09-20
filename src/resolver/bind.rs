@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::compiled::{CompiledDataset, CompiledField, CompiledMetric, CompiledModel};
+use crate::compiled::{CompiledDataset, CompiledField, CompiledMetric, CompiledModel, IssueTarget};
 use crate::model::Relationship;
 use crate::plan::JoinKey;
 use crate::query::{FilterOperator, SemanticQuery};
@@ -88,9 +88,9 @@ pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQu
             model.metric(name).cloned().ok_or_else(|| {
                 // A metric that failed to compile is absent here; say why
                 // rather than claiming it does not exist.
-                match model.issue_for(&format!("metric {name:?}")) {
+                match model.issue_for(&IssueTarget::metric(name)) {
                     Some(issue) => QueryError::NotCompiled {
-                        target: issue.target.clone(),
+                        target: issue.target.to_string(),
                         reason: issue.message.clone(),
                     },
                     None => QueryError::MetricNotFound(name.clone()),
@@ -127,9 +127,9 @@ pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQu
             .cloned()
             .ok_or_else(|| QueryError::DatasetNotFound(ds_name.to_string()))?;
         let field = dataset.field(field_name).cloned().ok_or_else(|| {
-            match model.issue_for(&format!("field {ds_name:?}.{field_name:?}")) {
+            match model.issue_for(&IssueTarget::field(ds_name, field_name)) {
                 Some(issue) => QueryError::NotCompiled {
-                    target: issue.target.clone(),
+                    target: issue.target.to_string(),
                     reason: issue.message.clone(),
                 },
                 None => QueryError::FieldNotFound(format!("{ds_name}.{field_name}")),

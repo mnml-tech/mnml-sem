@@ -35,7 +35,18 @@ pub enum LogicalPlan {
     Aggregate {
         input: Box<LogicalPlan>,
         group_by: Vec<Expr>,
-        aggregates: Vec<NamedAggregate>,
+        /// One bare aggregate per output column.
+        aggregates: Vec<NamedExpr>,
+    },
+    /// Compute output columns from the input's.
+    ///
+    /// Used above an [`LogicalPlan::Aggregate`] when a metric is a composite of
+    /// aggregates (`SUM(a) / COUNT(b)`), which a Substrait measure cannot hold.
+    /// The aggregates become measures and this recombines them.
+    Project {
+        input: Box<LogicalPlan>,
+        /// Output columns, in order. Pass-through columns are explicit.
+        exprs: Vec<NamedExpr>,
     },
 }
 
@@ -59,11 +70,20 @@ impl ScanColumn {
     }
 }
 
-/// Aggregate with output label (metric name).
+/// An expression with the name of the column it produces.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NamedAggregate {
+pub struct NamedExpr {
     pub name: String,
     pub expr: Expr,
+}
+
+impl NamedExpr {
+    pub fn new(name: impl Into<String>, expr: Expr) -> Self {
+        Self {
+            name: name.into(),
+            expr,
+        }
+    }
 }
 
 /// Prefer `ANSI_SQL`, else first dialect entry.

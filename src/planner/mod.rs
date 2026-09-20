@@ -4,7 +4,7 @@
 //! so this module only assembles plan nodes.
 
 use crate::compiled::CompiledModel;
-use crate::plan::{Expr, Literal, LogicalPlan, NamedAggregate, ScanColumn};
+use crate::plan::{ColumnRef, Expr, Literal, LogicalPlan, NamedExpr, ScanColumn};
 use crate::resolver::{BoundQuery, QueryError, ResolvedField};
 
 /// A group-by or filter field, qualified by its dataset.
@@ -166,20 +166,93 @@ pub fn build_logical_plan(
         group_by.push(qualify_column(field_expr(f), qualify));
     }
 
-    let aggregates: Vec<NamedAggregate> = bound
+    let metrics: Vec<NamedExpr> = bound
         .metrics
         .iter()
-        .map(|m| {
-            Ok(NamedAggregate {
-                name: m.name.clone(),
-                expr: m.expr.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, QueryError>>()?;
+        .map(|m| NamedExpr::new(&m.name, m.expr.clone()))
+        .collect();
 
-    Ok(LogicalPlan::Aggregate {
+    let Split {
+        aggregates,
+        projection,
+    } = split_composite_metrics(&group_by, metrics);
+
+    let aggregate = LogicalPlan::Aggregate {
         input: Box::new(after_filter),
         group_by,
         aggregates,
+    };
+
+    Ok(match projection {
+        None => aggregate,
+        Some(exprs) => LogicalPlan::Project {
+            input: Box::new(aggregate),
+            exprs,
+        },
     })
+}
+
+/// Metrics rearranged so every aggregate stands alone.
+struct Split {
+    /// One bare aggregate per measure.
+    aggregates: Vec<NamedExpr>,
+    /// Output columns over those measures, or `None` when every metric was
+    /// already a bare aggregate and no projection is needed.
+    projection: Option<Vec<NamedExpr>>,
+}
+
+/// Lift aggregate subtrees out of composite metrics.
+///
+/// A Substrait measure is a single aggregate call, so `SUM(a) / COUNT(b)`
+/// becomes two measures plus a projection that divides them. When no metric is
+/// composite the plan keeps its simpler shape.
+fn split_composite_metrics(group_by: &[Expr], metrics: Vec<NamedExpr>) -> Split {
+    if metrics.iter().all(|m| matches!(m.expr, Expr::Agg { .. })) {
+        return Split {
+            aggregates: metrics,
+            projection: None,
+        };
+    }
+
+    let prefix = fresh_measure_prefix(group_by);
+    let mut aggregates: Vec<NamedExpr> = Vec::new();
+    let mut projection = Vec::with_capacity(metrics.len());
+    for m in metrics {
+        let expr = extract_aggregates(&m.expr, &prefix, &mut aggregates);
+        projection.push(NamedExpr::new(m.name, expr));
+    }
+    Split {
+        aggregates,
+        projection: Some(projection),
+    }
+}
+
+/// Replace each aggregate subtree with a reference to a synthesized measure
+/// column, collecting the aggregates. Identical aggregates share one measure.
+fn extract_aggregates(expr: &Expr, prefix: &str, out: &mut Vec<NamedExpr>) -> Expr {
+    if matches!(expr, Expr::Agg { .. }) {
+        if let Some(existing) = out.iter().find(|m| m.expr == *expr) {
+            return Expr::column("", existing.name.clone());
+        }
+        let name = format!("{prefix}{}", out.len());
+        out.push(NamedExpr::new(&name, expr.clone()));
+        return Expr::column("", name);
+    }
+    expr.map_children(&mut |child| extract_aggregates(child, prefix, out))
+}
+
+/// A measure-name prefix that cannot collide with a grouping column.
+fn fresh_measure_prefix(group_by: &[Expr]) -> String {
+    let taken: Vec<&str> = group_by
+        .iter()
+        .filter_map(|e| match e {
+            Expr::Column(ColumnRef { column, .. }) => Some(column.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut prefix = "__agg".to_string();
+    while taken.iter().any(|c| c.starts_with(&prefix)) {
+        prefix.push('_');
+    }
+    prefix
 }

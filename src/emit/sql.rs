@@ -2,9 +2,11 @@
 //!
 //! SQL is derived from the structured plan (secondary to Substrait).
 
+use std::collections::HashMap;
+
 use crate::emit::EmitError;
 use crate::plan::{format_expr, format_join_on, SqlCtx};
-use crate::plan::{LogicalPlan, NamedAggregate};
+use crate::plan::{Expr, LogicalPlan, NamedExpr};
 use crate::sql_dialect::{Ansi, SqlDialect};
 
 /// Build a single ANSI `SELECT` statement for the plan tree.
@@ -13,23 +15,65 @@ pub fn to_sql(plan: &LogicalPlan) -> Result<String, EmitError> {
 }
 
 /// Build a single `SELECT` statement for the plan tree in the given SQL `dialect`.
+///
+/// A [`LogicalPlan::Project`] over an aggregate is flattened rather than
+/// emitted as a subquery: SQL allows a composite of aggregates directly in the
+/// select list, so the measures the planner lifted out are put back.
 pub fn to_sql_with(plan: &LogicalPlan, dialect: &dyn SqlDialect) -> Result<String, EmitError> {
-    match plan {
-        LogicalPlan::Aggregate {
-            input,
-            group_by,
-            aggregates,
-        } => {
-            let ctx = SqlCtx {
-                dialect,
-                qualify: is_multi_table(input),
-            };
-            emit_aggregate_root(input.as_ref(), group_by, aggregates, ctx)
+    let (aggregate, projection) = match plan {
+        LogicalPlan::Aggregate { .. } => (plan, None),
+        LogicalPlan::Project { input, exprs } if matches!(**input, LogicalPlan::Aggregate { .. }) => {
+            (input.as_ref(), Some(exprs.as_slice()))
         }
-        _ => Err(EmitError::Unsupported(
-            "root must be Aggregate (use planner output)",
-        )),
+        _ => {
+            return Err(EmitError::Unsupported(
+                "root must be Aggregate, or Project over Aggregate (use planner output)",
+            ));
+        }
+    };
+
+    let LogicalPlan::Aggregate {
+        input,
+        group_by,
+        aggregates,
+    } = aggregate
+    else {
+        unreachable!("matched above");
+    };
+
+    let ctx = SqlCtx {
+        dialect,
+        qualify: is_multi_table(input),
+    };
+
+    let outputs: Vec<NamedExpr> = match projection {
+        None => aggregates.clone(),
+        Some(exprs) => {
+            let measures: HashMap<&str, &Expr> = aggregates
+                .iter()
+                .map(|a| (a.name.as_str(), &a.expr))
+                .collect();
+            exprs
+                .iter()
+                .map(|e| NamedExpr::new(&e.name, inline_measures(&e.expr, &measures)))
+                .collect()
+        }
+    };
+
+    emit_aggregate_root(input.as_ref(), group_by, &outputs, ctx)
+}
+
+/// Substitute references to lifted measures back with the aggregates
+/// themselves, so the select list reads as it was written in the model.
+fn inline_measures(expr: &Expr, measures: &HashMap<&str, &Expr>) -> Expr {
+    if let Expr::Column(c) = expr {
+        if c.dataset.is_empty() {
+            if let Some(agg) = measures.get(c.column.as_str()) {
+                return (*agg).clone();
+            }
+        }
     }
+    expr.map_children(&mut |child| inline_measures(child, measures))
 }
 
 fn is_multi_table(plan: &LogicalPlan) -> bool {
@@ -42,19 +86,19 @@ fn is_multi_table(plan: &LogicalPlan) -> bool {
 
 fn emit_aggregate_root(
     input: &LogicalPlan,
-    group_by: &[crate::plan::Expr],
-    aggregates: &[NamedAggregate],
+    group_by: &[Expr],
+    outputs: &[NamedExpr],
     ctx: SqlCtx,
 ) -> Result<String, EmitError> {
     let (from_sql, where_sql) = from_and_where(input, ctx)?;
 
     let mut select_items: Vec<String> = group_by.iter().map(|e| format_expr(e, ctx)).collect();
 
-    for a in aggregates {
+    for o in outputs {
         select_items.push(format!(
             "{} AS {}",
-            format_expr(&a.expr, ctx),
-            ctx.dialect.quote_ident(&a.name)
+            format_expr(&o.expr, ctx),
+            ctx.dialect.quote_ident(&o.name)
         ));
     }
 
@@ -137,9 +181,9 @@ fn from_join_or_scan(plan: &LogicalPlan, ctx: SqlCtx) -> Result<String, EmitErro
         LogicalPlan::Filter { .. } => Err(EmitError::InvalidPlan(
             "Filter must be peeled before FROM",
         )),
-        LogicalPlan::Aggregate { .. } => Err(EmitError::Unsupported(
-            "nested Aggregate under FROM",
-        )),
+        LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(
+            EmitError::Unsupported("nested Aggregate/Project under FROM"),
+        ),
     }
 }
 
@@ -166,7 +210,7 @@ mod tests {
                 ),
             }),
             group_by: vec![Expr::column("", "id")],
-            aggregates: vec![crate::plan::NamedAggregate {
+            aggregates: vec![crate::plan::NamedExpr {
                 name: "row_count".into(),
                 expr: Expr::Agg {
                     func: Func::Count,
@@ -206,7 +250,7 @@ mod tests {
                 columns: vec![ScanColumn::new("d", None)],
             }),
             group_by: vec![],
-            aggregates: vec![crate::plan::NamedAggregate {
+            aggregates: vec![crate::plan::NamedExpr {
                 name: "today".into(),
                 expr: Expr::Agg {
                     func: Func::Max,

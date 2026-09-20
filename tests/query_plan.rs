@@ -3,12 +3,12 @@
 use ossie_substrait::emit::sql::to_sql;
 #[cfg(feature = "substrait")]
 use ossie_substrait::emit::substrait::to_plan;
-use ossie_substrait::compiled::CompiledModel;
+use ossie_substrait::compiled::{CompiledModel, IssueTarget};
 use ossie_substrait::model::OssieDocument;
 use ossie_substrait::parser::from_yaml_str;
 use ossie_substrait::catalog::Func;
 use ossie_substrait::plan::expr::{Expr, Literal};
-use ossie_substrait::plan::{LogicalPlan, NamedAggregate};
+use ossie_substrait::plan::{LogicalPlan, NamedExpr};
 use ossie_substrait::planner::build_logical_plan;
 use ossie_substrait::query::{FilterOperator, FilterSpec, SemanticQuery};
 use ossie_substrait::resolver::{QueryError, bind_query};
@@ -82,7 +82,7 @@ fn logical_plan_shape() {
     assert_eq!(group_by, vec![Expr::column("", "id")]);
     assert_eq!(
         aggregates,
-        vec![NamedAggregate {
+        vec![NamedExpr {
             name: "row_count".into(),
             expr: Expr::Agg {
                 func: Func::Count,
@@ -394,24 +394,53 @@ fn aggregate_over_case_is_structured() {
     assert!(matches!(&args[0], Expr::Case { .. }), "{:?}", args[0]);
 }
 
-/// `SUM(a) / NULLIF(SUM(b), 0)` — the composite case that needs a projection
-/// above the Substrait aggregate.
+/// `SUM(a) / NULLIF(SUM(b), 0)` — the composite case. The plan says what it
+/// does: two measures, plus a projection that recombines them.
 #[test]
-fn composite_metric_plans_and_emits_sql() {
+fn composite_metric_plans_a_projection_over_the_aggregate() {
     let plan = steelwheels_plan(&["avg_unit_price"], &[]);
-    let LogicalPlan::Aggregate { aggregates, .. } = &plan else {
-        panic!("expected aggregate root");
+
+    let LogicalPlan::Project { input, exprs } = &plan else {
+        panic!("expected a Project root, got {plan:?}");
     };
+    assert_eq!(exprs.len(), 1);
+    assert_eq!(exprs[0].name, "avg_unit_price");
     assert!(
-        matches!(&aggregates[0].expr, Expr::Call { func: Func::Divide, .. }),
-        "expected a division at the metric root, got {:?}",
-        aggregates[0].expr
+        matches!(&exprs[0].expr, Expr::Call { func: Func::Divide, .. }),
+        "{:?}",
+        exprs[0].expr
     );
-    // SQL needs no restructuring — a composite aggregate is legal in a SELECT list.
+
+    let LogicalPlan::Aggregate { aggregates, .. } = input.as_ref() else {
+        panic!("expected an Aggregate under the projection");
+    };
+    assert_eq!(aggregates.len(), 2, "SUM(totalprice) and SUM(quantityordered)");
+    assert!(
+        aggregates.iter().all(|a| matches!(a.expr, Expr::Agg { .. })),
+        "every measure must be a bare aggregate: {aggregates:?}"
+    );
+
+    // The rendered plan shows the projection rather than hiding it.
+    let shown = format!("{}", plan.display_indent());
+    assert!(shown.contains("Project:"), "{shown}");
+    assert!(shown.contains("Aggregate:"), "{shown}");
+
+    // SQL flattens it back: a composite of aggregates is legal in a select list.
     let sql = to_sql(&plan).expect("sql");
     assert!(
         sql.contains("(SUM(totalprice) / NULLIF(SUM(quantityordered), 0)) AS avg_unit_price"),
         "{sql}"
+    );
+    assert!(!sql.contains("__agg"), "measure names must not leak: {sql}");
+}
+
+/// A bare aggregate needs no projection, so the plan keeps its simpler shape.
+#[test]
+fn simple_metric_plans_no_projection() {
+    let plan = steelwheels_plan(&["sales"], &[]);
+    assert!(
+        matches!(plan, LogicalPlan::Aggregate { .. }),
+        "got {plan:?}"
     );
 }
 
@@ -536,7 +565,7 @@ metrics:
     // Compiling surfaces it immediately, naming the metric...
     let model = CompiledModel::compile(&doc).expect("the model still compiles");
     assert_eq!(model.issues.len(), 1);
-    assert!(model.issues[0].target.contains("windowed"), "{:?}", model.issues[0]);
+    assert_eq!(model.issues[0].target, IssueTarget::metric("windowed"));
     assert!(model.issues[0].message.contains("window function"));
 
     // ...and querying it repeats the reason rather than claiming it is missing.
@@ -581,11 +610,11 @@ metrics:
     let doc = from_yaml_str(yaml).expect("parse");
     let model = CompiledModel::compile(&doc).expect("compile");
 
-    let targets: Vec<&str> = model.issues.iter().map(|i| i.target.as_str()).collect();
+    let targets: Vec<&IssueTarget> = model.issues.iter().map(|i| &i.target).collect();
     assert_eq!(targets.len(), 3, "{targets:?}");
-    assert!(targets.iter().any(|t| t.contains("bad_field")), "{targets:?}");
-    assert!(targets.iter().any(|t| t.contains("bad_metric_a")), "{targets:?}");
-    assert!(targets.iter().any(|t| t.contains("bad_metric_b")), "{targets:?}");
+    assert!(targets.contains(&&IssueTarget::field("t", "bad_field")), "{targets:?}");
+    assert!(targets.contains(&&IssueTarget::metric("bad_metric_a")), "{targets:?}");
+    assert!(targets.contains(&&IssueTarget::metric("bad_metric_b")), "{targets:?}");
 
     // The good field survives, so the rest of the model is still queryable.
     assert!(model.dataset("t").expect("dataset").field("ok").is_some());

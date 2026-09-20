@@ -79,11 +79,39 @@ pub struct CompiledMetric {
     pub datasets: BTreeSet<String>,
 }
 
+/// What a [`CompileIssue`] is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueTarget {
+    Field { dataset: String, field: String },
+    Metric { name: String },
+}
+
+impl IssueTarget {
+    pub fn field(dataset: impl Into<String>, field: impl Into<String>) -> Self {
+        IssueTarget::Field {
+            dataset: dataset.into(),
+            field: field.into(),
+        }
+    }
+
+    pub fn metric(name: impl Into<String>) -> Self {
+        IssueTarget::Metric { name: name.into() }
+    }
+}
+
+impl std::fmt::Display for IssueTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueTarget::Field { dataset, field } => write!(f, "field {dataset:?}.{field:?}"),
+            IssueTarget::Metric { name } => write!(f, "metric {name:?}"),
+        }
+    }
+}
+
 /// An expression that could not be compiled.
 #[derive(Debug, Clone)]
 pub struct CompileIssue {
-    /// `field "dataset"."name"` or `metric "name"`.
-    pub target: String,
+    pub target: IssueTarget,
     pub message: String,
 }
 
@@ -106,10 +134,16 @@ pub struct CompiledModel {
 }
 
 impl CompiledModel {
-    /// Compile the document's model, keeping whatever compiles.
+    /// Load a document: validate its structure, then compile its expressions.
     ///
-    /// Anything that does not is recorded in [`Self::issues`].
+    /// This is the entry point — it performs every check the crate makes.
+    /// Structural problems (wrong spec version, duplicate names, relationships
+    /// naming datasets that do not exist) are fatal, because they leave the
+    /// model ambiguous. A single expression that will not compile is not: it is
+    /// recorded in [`Self::issues`] and that one field or metric becomes
+    /// unusable while the rest of the model still works.
     pub fn compile(doc: &OssieDocument) -> Result<Self, Error> {
+        crate::validate::validate(doc)?;
         Self::compile_model(&doc.model)
     }
 
@@ -124,6 +158,8 @@ impl CompiledModel {
         Ok(compiled)
     }
 
+    /// Compile a model's expressions without the document-level structural
+    /// checks. Prefer [`Self::compile`], which does both.
     pub fn compile_model(model: &SemanticModel) -> Result<Self, Error> {
         let mut issues = Vec::new();
 
@@ -151,8 +187,8 @@ impl CompiledModel {
     }
 
     /// Why `target` failed to compile, if it did.
-    pub fn issue_for(&self, target: &str) -> Option<&CompileIssue> {
-        self.issues.iter().find(|i| i.target.contains(target))
+    pub fn issue_for(&self, target: &IssueTarget) -> Option<&CompileIssue> {
+        self.issues.iter().find(|i| i.target == *target)
     }
 
     pub fn dataset(&self, name: &str) -> Option<&CompiledDataset> {
@@ -182,7 +218,7 @@ fn compile_field(
     dataset: &str,
     issues: &mut Vec<CompileIssue>,
 ) -> Option<CompiledField> {
-    let target = format!("field {:?}.{:?}", dataset, field.name);
+    let target = IssueTarget::field(dataset, &field.name);
     let (dialect, sql) = match pick_expression_dialect(&field.expression) {
         Some(picked) => picked,
         None => {
@@ -221,7 +257,7 @@ fn compile_metric(
     model: &SemanticModel,
     issues: &mut Vec<CompileIssue>,
 ) -> Option<CompiledMetric> {
-    let target = format!("metric {:?}", metric.name);
+    let target = IssueTarget::metric(&metric.name);
     let (dialect, sql) = match pick_expression_dialect(&metric.expression) {
         Some(picked) => picked,
         None => {

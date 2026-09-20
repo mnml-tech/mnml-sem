@@ -23,7 +23,7 @@ use crate::catalog::{self, Func};
 use crate::emit::EmitError;
 use crate::model::DataType;
 use crate::plan::expr::{ColumnRef, Expr, JoinKey, Literal};
-use crate::plan::{LogicalPlan, NamedAggregate, ScanColumn};
+use crate::plan::{LogicalPlan, NamedExpr, ScanColumn};
 
 #[derive(Debug, Clone)]
 struct SchemaContext {
@@ -67,36 +67,51 @@ pub fn encode_plan(plan: &proto::Plan) -> Vec<u8> {
     plan.encode_to_vec()
 }
 
-/// Build a Substrait plan from `plan` (aggregate root).
+/// Build a Substrait plan from `plan`.
+///
+/// The root is an [`LogicalPlan::Aggregate`], or a [`LogicalPlan::Project`]
+/// over one when a metric combines several aggregates.
 pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
+    let (aggregate, projection) = match plan {
+        LogicalPlan::Aggregate { .. } => (plan, None),
+        LogicalPlan::Project { input, exprs }
+            if matches!(**input, LogicalPlan::Aggregate { .. }) =>
+        {
+            (input.as_ref(), Some(exprs))
+        }
+        _ => {
+            return Err(EmitError::Unsupported(
+                "root must be Aggregate, or Project over Aggregate (use planner output)",
+            ));
+        }
+    };
+
     let LogicalPlan::Aggregate {
         input,
         group_by,
         aggregates,
-    } = plan
+    } = aggregate
     else {
-        return Err(EmitError::Unsupported(
-            "root must be Aggregate (use planner output)",
-        ));
+        unreachable!("matched above");
     };
 
     let mut ctx = SchemaContext::new();
     let input_rel = emit_rel(input, &mut ctx)?;
+    let rel = emit_aggregate_rel(input_rel, group_by, aggregates, &mut ctx)?;
 
-    // A Substrait measure is a single aggregate call, so a composite metric
-    // such as `SUM(a) / COUNT(b)` becomes N measures plus a projection above
-    // the aggregate that recombines them.
-    let split = split_aggregates(aggregates);
-    let rel = emit_aggregate_rel(input_rel, group_by, &split.measures, &mut ctx)?;
-    let rel = match &split.projections {
-        None => rel,
-        Some(projections) => emit_project_rel(rel, group_by.len(), projections, &mut ctx)?,
+    let (rel, output_names) = match projection {
+        None => {
+            let mut names: Vec<String> = group_by.iter().map(output_name_for_expr).collect();
+            names.extend(aggregates.iter().map(|a| a.name.clone()));
+            (rel, names)
+        }
+        Some(exprs) => {
+            let rel = emit_project_rel(rel, group_by.len(), exprs, &mut ctx)?;
+            let mut names: Vec<String> = group_by.iter().map(output_name_for_expr).collect();
+            names.extend(exprs.iter().map(|e| e.name.clone()));
+            (rel, names)
+        }
     };
-
-    let mut output_names: Vec<String> = group_by.iter().map(output_name_for_expr).collect();
-    for a in aggregates {
-        output_names.push(a.name.clone());
-    }
 
     Ok(proto::Plan {
         version: Some(proto::Version {
@@ -134,7 +149,7 @@ fn emit_rel(plan: &LogicalPlan, ctx: &mut SchemaContext) -> Result<proto::Rel, E
         } => emit_scan(source, dataset, columns, ctx),
         LogicalPlan::Join { left, right, on } => emit_join(left, right, on, ctx),
         LogicalPlan::Filter { input, predicate } => emit_filter(input, predicate, ctx),
-        LogicalPlan::Aggregate { .. } => Err(EmitError::InvalidPlan(
+        LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(EmitError::InvalidPlan(
             "unexpected nested Aggregate in input rel",
         )),
     }
@@ -252,7 +267,7 @@ fn emit_filter(
 fn emit_aggregate_rel(
     input: proto::Rel,
     group_by: &[Expr],
-    aggregates: &[NamedAggregate],
+    aggregates: &[NamedExpr],
     ctx: &mut SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
     let grouping_expressions: Vec<proto::Expression> = group_by
@@ -301,67 +316,17 @@ fn emit_aggregate_rel(
     })
 }
 
-/// Metric expressions rearranged into Substrait's aggregate shape.
-struct AggregateSplit {
-    /// One bare aggregate per Substrait measure.
-    measures: Vec<NamedAggregate>,
-    /// `(metric name, expression over the measure outputs)`, or `None` when
-    /// every metric was already a bare aggregate and no projection is needed.
-    projections: Option<Vec<(String, Expr)>>,
-}
-
-fn split_aggregates(aggregates: &[NamedAggregate]) -> AggregateSplit {
-    let composite = aggregates
-        .iter()
-        .any(|a| !matches!(a.expr, Expr::Agg { .. }));
-    if !composite {
-        return AggregateSplit {
-            measures: aggregates.to_vec(),
-            projections: None,
-        };
-    }
-
-    let mut measures: Vec<NamedAggregate> = Vec::new();
-    let mut projections = Vec::with_capacity(aggregates.len());
-    for a in aggregates {
-        let rewritten = extract_aggregates(&a.expr, &mut measures);
-        projections.push((a.name.clone(), rewritten));
-    }
-    AggregateSplit {
-        measures,
-        projections: Some(projections),
-    }
-}
-
-/// Replace each aggregate subtree with a reference to a synthesized measure
-/// column, collecting the aggregates into `measures`. Identical aggregates
-/// share one measure.
-fn extract_aggregates(expr: &Expr, measures: &mut Vec<NamedAggregate>) -> Expr {
-    if matches!(expr, Expr::Agg { .. }) {
-        if let Some(existing) = measures.iter().find(|m| m.expr == *expr) {
-            return Expr::column("", existing.name.clone());
-        }
-        let name = format!("__agg{}", measures.len());
-        measures.push(NamedAggregate {
-            name: name.clone(),
-            expr: expr.clone(),
-        });
-        return Expr::column("", name);
-    }
-    expr.map_children(&mut |child| extract_aggregates(child, measures))
-}
-
 /// Project the grouping columns through unchanged and append one computed
 /// column per metric.
 fn emit_project_rel(
     input: proto::Rel,
     group_count: usize,
-    projections: &[(String, Expr)],
+    projections: &[NamedExpr],
     ctx: &mut SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
     let expressions: Vec<proto::Expression> = projections
         .iter()
-        .map(|(_, e)| emit_expr(e, ctx))
+        .map(|p| emit_expr(&p.expr, ctx))
         .collect::<Result<_, _>>()?;
 
     // ProjectRel appends its expressions to the input columns, so the emit
@@ -375,8 +340,8 @@ fn emit_project_rel(
     new_ctx
         .columns
         .extend(ctx.columns.iter().take(group_count).cloned());
-    for (name, _) in projections {
-        new_ctx.columns.push((String::new(), name.clone()));
+    for p in projections {
+        new_ctx.columns.push((String::new(), p.name.clone()));
     }
     *ctx = new_ctx;
 
@@ -395,7 +360,7 @@ fn emit_project_rel(
     })
 }
 
-fn emit_measure(agg: &NamedAggregate, ctx: &SchemaContext) -> Result<Measure, EmitError> {
+fn emit_measure(agg: &NamedExpr, ctx: &SchemaContext) -> Result<Measure, EmitError> {
     let Expr::Agg {
         func,
         distinct,
@@ -757,7 +722,7 @@ mod tests {
     use super::*;
     use crate::catalog::Func;
     use crate::plan::expr::{Expr, Literal};
-    use crate::plan::{LogicalPlan, NamedAggregate, ScanColumn};
+    use crate::plan::{LogicalPlan, NamedExpr, ScanColumn};
 
     fn minimal_plan() -> LogicalPlan {
         LogicalPlan::Aggregate {
@@ -778,7 +743,7 @@ mod tests {
                 ),
             }),
             group_by: vec![Expr::column("", "id")],
-            aggregates: vec![NamedAggregate {
+            aggregates: vec![NamedExpr {
                 name: "row_count".into(),
                 expr: Expr::Agg {
                     func: Func::Count,

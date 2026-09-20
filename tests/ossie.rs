@@ -4,6 +4,7 @@ use ossie_substrait::model::{
     AiContext, DataType, DialectExpression, Expression, FieldDimension, OSSIE_SPEC_VERSION,
     OssieDocument, SemanticModel,
 };
+use ossie_substrait::compiled::CompiledModel;
 use ossie_substrait::{parser, validate};
 use std::path::PathBuf;
 
@@ -212,4 +213,60 @@ fn dialect_entries_take_only_dialect_and_expression() {
     );
     let err = parser::from_yaml_str(&yaml).expect_err("extra keys must not parse");
     assert!(err.to_string().contains("unknown field"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// One load path: compile performs every check the crate makes.
+// ---------------------------------------------------------------------------
+
+/// Structural problems leave the model ambiguous, so they are fatal — and
+/// `compile` must catch them, not only `validate`.
+#[test]
+fn compile_rejects_structural_problems() {
+    let duplicate_datasets = format!(
+        "version: \"{OSSIE_SPEC_VERSION}\"\nname: m\ndatasets:\n  - name: d\n    source: a\n  - name: d\n    source: b\n"
+    );
+    let doc = parser::from_yaml_str(&duplicate_datasets).expect("parse");
+    let err = CompiledModel::compile(&doc).expect_err("duplicate dataset names are fatal");
+    assert!(err.to_string().contains("duplicate dataset name"), "{err}");
+
+    let bad_relationship = format!(
+        "version: \"{OSSIE_SPEC_VERSION}\"\nname: m\ndatasets:\n  - name: d\n    source: a\nrelationships:\n  - name: r\n    from: d\n    to: nope\n    from_columns: [x]\n    to_columns: [y]\n"
+    );
+    let doc = parser::from_yaml_str(&bad_relationship).expect("parse");
+    let err = CompiledModel::compile(&doc).expect_err("dangling relationship is fatal");
+    assert!(err.to_string().contains("unknown dataset"), "{err}");
+
+    let wrong_version = "version: \"0.1.1\"\nname: m\ndatasets:\n  - name: d\n    source: a\n";
+    let doc = parser::from_yaml_str(wrong_version).expect("parse");
+    assert!(CompiledModel::compile(&doc).is_err(), "wrong version is fatal");
+}
+
+/// A broken expression is not fatal: it costs you that one item.
+#[test]
+fn compile_keeps_going_past_a_broken_expression() {
+    let yaml = format!(
+        r#"version: "{OSSIE_SPEC_VERSION}"
+name: m
+datasets:
+  - name: d
+    source: a
+    fields:
+      - name: good
+        expression:
+          dialects: [{{ dialect: ANSI_SQL, expression: good }}]
+metrics:
+  - name: usable
+    expression:
+      dialects: [{{ dialect: ANSI_SQL, expression: "COUNT(*)" }}]
+  - name: broken
+    expression:
+      dialects: [{{ dialect: ANSI_SQL, expression: "RANK() OVER (ORDER BY d.good)" }}]
+"#
+    );
+    let doc = parser::from_yaml_str(&yaml).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("the model still loads");
+    assert_eq!(model.issues.len(), 1);
+    assert!(model.metric("usable").is_some(), "the good metric survives");
+    assert!(model.metric("broken").is_none(), "the broken one is excluded");
 }
