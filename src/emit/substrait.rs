@@ -344,11 +344,15 @@ fn emit_measure(agg: &NamedExpr, ctx: &SchemaContext) -> Result<Measure, EmitErr
             .collect::<Result<Vec<_>, EmitError>>()?
     };
 
+    // Declared only where Ossie says enough to know it; a consumer derives
+    // the rest from the function definition rather than trusting a guess.
+    let output_type = agg.expr.result_type(&ctx.columns).map(substrait_type_of);
+
     Ok(Measure {
         measure: Some(proto::AggregateFunction {
             function_reference,
             arguments,
-            output_type: None,
+            output_type,
             phase: AggregationPhase::Unspecified as i32,
             invocation: if *distinct {
                 AggregationInvocation::Distinct as i32
@@ -563,8 +567,27 @@ const TIMESTAMP_PRECISION_MICROS: i32 = 6;
 /// `Integer` widens to `i64`: Ossie leaves width unspecified, and `i64` holds
 /// every integral value Ossie can describe.
 fn substrait_type(datatype: Option<DataType>) -> proto::Type {
+    match datatype {
+        Some(t) => substrait_type_of(t),
+        None => unknown_type(),
+    }
+}
+
+/// Substrait's `unknown`, for a type Ossie leaves unstated.
+fn unknown_type() -> proto::Type {
+    proto::Type {
+        kind: Some(Kind::UserDefined(proto::r#type::UserDefined {
+            type_reference: catalog::UNKNOWN_TYPE_ANCHOR,
+            type_variation_reference: 0,
+            nullability: Nullability::Nullable as i32,
+            type_parameters: vec![],
+        })),
+    }
+}
+
+fn substrait_type_of(datatype: DataType) -> proto::Type {
     let nullability = Nullability::Nullable as i32;
-    let kind = match datatype {
+    let kind = match Some(datatype) {
         Some(DataType::String) => Kind::String(proto::r#type::String {
             type_variation_reference: 0,
             nullability,

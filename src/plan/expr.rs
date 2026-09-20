@@ -16,7 +16,9 @@
 //! carries each one's arity, Substrait coordinates, and SQL rendering. Adding a
 //! function is a table row, not a change to this enum.
 
-use crate::catalog::Func;
+use crate::catalog::{self, Func};
+use crate::model::DataType;
+use crate::plan::{SchemaColumn, find_column};
 use serde_json::Value;
 
 /// Reference to a physical column of a logical dataset.
@@ -48,6 +50,17 @@ pub enum Literal {
 }
 
 impl Literal {
+    /// The type this literal denotes. `NULL` denotes none.
+    pub fn datatype(&self) -> Option<DataType> {
+        Some(match self {
+            Literal::Null => return None,
+            Literal::Bool(_) => DataType::Boolean,
+            Literal::Int64(_) => DataType::Integer,
+            Literal::Float64(_) => DataType::Float,
+            Literal::String(_) => DataType::String,
+        })
+    }
+
     /// Convert a JSON filter value.
     ///
     /// Composite JSON (arrays, objects) has no literal form; callers that can
@@ -134,6 +147,36 @@ impl Expr {
             0 => Expr::Literal(empty),
             1 => exprs.into_iter().next().expect("len 1"),
             _ => Expr::Call { func, args: exprs },
+        }
+    }
+
+    /// The type this expression produces, given the schema it reads.
+    ///
+    /// `None` wherever the answer is not determined — an undeclared column, or
+    /// a function whose result depends on an argument whose type is unknown.
+    /// Ossie's `datatype` is optional, so that is the common case and it must
+    /// stay `None` rather than become a guess.
+    pub fn result_type(&self, schema: &[SchemaColumn]) -> Option<DataType> {
+        match self {
+            Expr::Column(c) => {
+                find_column(schema, &c.dataset, &c.column).and_then(|i| schema[i].datatype)
+            }
+            Expr::Literal(lit) => lit.datatype(),
+            Expr::Call { func, args } | Expr::Agg { func, args, .. } => {
+                let arg_types: Vec<Option<DataType>> =
+                    args.iter().map(|a| a.result_type(schema)).collect();
+                catalog::def(*func).returns.resolve(&arg_types)
+            }
+            // Every branch should agree; the first known one answers.
+            Expr::Case {
+                when_then,
+                else_expr,
+            } => when_then
+                .iter()
+                .map(|(_, then)| then)
+                .chain(std::iter::once(else_expr.as_ref()))
+                .find_map(|e| e.result_type(schema)),
+            Expr::InList { .. } => Some(DataType::Boolean),
         }
     }
 

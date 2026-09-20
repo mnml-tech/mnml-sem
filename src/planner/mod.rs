@@ -256,11 +256,11 @@ fn check_expr(expr: &Expr, schema: &[SchemaColumn]) -> Result<(), QueryError> {
                 column: output_name(expr),
                 available: schema
                     .iter()
-                    .map(|(d, n)| {
-                        if d.is_empty() {
-                            n.clone()
+                    .map(|c| {
+                        if c.dataset.is_empty() {
+                            c.name.clone()
                         } else {
-                            format!("{d}.{n}")
+                            format!("{}.{}", c.dataset, c.name)
                         }
                     })
                     .collect::<Vec<_>>()

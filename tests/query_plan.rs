@@ -1,12 +1,12 @@
 //! Bind + logical plan tests.
 
+use ossie_substrait::catalog::Func;
+use ossie_substrait::compiled::{CompiledModel, IssueTarget};
 use ossie_substrait::emit::sql::to_sql;
 #[cfg(feature = "substrait")]
 use ossie_substrait::emit::substrait::to_plan;
-use ossie_substrait::compiled::{CompiledModel, IssueTarget};
-use ossie_substrait::model::OssieDocument;
+use ossie_substrait::model::{DataType, OssieDocument};
 use ossie_substrait::parser::from_yaml_str;
-use ossie_substrait::catalog::Func;
 use ossie_substrait::plan::expr::{Expr, Literal};
 use ossie_substrait::plan::{LogicalPlan, NamedExpr};
 use ossie_substrait::planner::build_logical_plan;
@@ -38,7 +38,9 @@ fn bind_group_by_only() {
 #[test]
 fn bind_metrics_only_errors_without_dataset() {
     let model = minimal_model();
-    let err = bind_query(&model, &SemanticQuery {
+    let err = bind_query(
+        &model,
+        &SemanticQuery {
             metrics: vec!["row_count".into()],
             ..Default::default()
         },
@@ -185,16 +187,19 @@ fn steelwheels_join_orderfact_and_dates() {
     let plan = build_logical_plan(&bound, &model).expect("plan");
     let s = format!("{}", plan.display_indent());
     assert!(s.contains("Join:"), "{s}");
-    assert!(s.contains("orderfact") || s.contains("steelwheels.orderfact"), "{s}");
-    assert!(s.contains("dates") || s.contains("steelwheels.dates"), "{s}");
+    assert!(
+        s.contains("orderfact") || s.contains("steelwheels.orderfact"),
+        "{s}"
+    );
+    assert!(
+        s.contains("dates") || s.contains("steelwheels.dates"),
+        "{s}"
+    );
 
     let LogicalPlan::Aggregate { group_by, .. } = plan else {
         panic!("expected aggregate root");
     };
-    assert_eq!(
-        group_by,
-        vec![Expr::column("dates", "year_id")]
-    );
+    assert_eq!(group_by, vec![Expr::column("dates", "year_id")]);
 }
 
 #[test]
@@ -202,20 +207,27 @@ fn disconnected_datasets_error() {
     let yaml = include_str!("fixtures/disconnected.yaml");
     let doc: OssieDocument = from_yaml_str(yaml).expect("parse");
     let model = CompiledModel::compile(&doc).expect("compile");
-    let err = bind_query(&model, &SemanticQuery {
+    let err = bind_query(
+        &model,
+        &SemanticQuery {
             group_by: vec!["alpha.id".into(), "beta.id".into()],
             dataset: Some("alpha".into()),
             ..Default::default()
         },
     )
     .unwrap_err();
-    assert!(matches!(err, QueryError::DisconnectedDatasets(_)), "{err:?}");
+    assert!(
+        matches!(err, QueryError::DisconnectedDatasets(_)),
+        "{err:?}"
+    );
 }
 
 #[test]
 fn multi_dataset_requires_root_dataset() {
     let model = steelwheels_model();
-    let err = bind_query(&model, &SemanticQuery {
+    let err = bind_query(
+        &model,
+        &SemanticQuery {
             group_by: vec!["orderfact.order_status".into(), "dates.year_id".into()],
             ..Default::default()
         },
@@ -239,7 +251,10 @@ fn people_daily_tenant_model_validates_and_plans() {
             "people_daily.employment_type_name".into(),
         ],
         dataset: Some("people_daily".into()),
-        filters: vec![FilterSpec::new("people_daily.year", serde_json::json!([2024, 2025]))],
+        filters: vec![FilterSpec::new(
+            "people_daily.year",
+            serde_json::json!([2024, 2025]),
+        )],
     };
     let bound = bind_query(&model, &spec).expect("bind");
     build_logical_plan(&bound, &model).expect("plan");
@@ -370,15 +385,28 @@ fn aggregate_over_arithmetic_is_structured() {
         panic!("expected aggregate root");
     };
     let Expr::Agg { func, args, .. } = &aggregates[0].expr else {
-        panic!("expected a structured aggregate, got {:?}", aggregates[0].expr);
+        panic!(
+            "expected a structured aggregate, got {:?}",
+            aggregates[0].expr
+        );
     };
     assert_eq!(*func, Func::Sum);
     assert!(
-        matches!(&args[0], Expr::Call { func: Func::Multiply, .. }),
+        matches!(
+            &args[0],
+            Expr::Call {
+                func: Func::Multiply,
+                ..
+            }
+        ),
         "{:?}",
         args[0]
     );
-    assert!(to_sql(&plan).expect("sql").contains("SUM((quantityordered * priceeach))"));
+    assert!(
+        to_sql(&plan)
+            .expect("sql")
+            .contains("SUM((quantityordered * priceeach))")
+    );
 }
 
 /// `SUM(CASE WHEN … END)` — an aggregate over a conditional.
@@ -406,7 +434,13 @@ fn composite_metric_plans_a_projection_over_the_aggregate() {
     assert_eq!(exprs.len(), 1);
     assert_eq!(exprs[0].name, "avg_unit_price");
     assert!(
-        matches!(&exprs[0].expr, Expr::Call { func: Func::Divide, .. }),
+        matches!(
+            &exprs[0].expr,
+            Expr::Call {
+                func: Func::Divide,
+                ..
+            }
+        ),
         "{:?}",
         exprs[0].expr
     );
@@ -414,9 +448,15 @@ fn composite_metric_plans_a_projection_over_the_aggregate() {
     let LogicalPlan::Aggregate { aggregates, .. } = input.as_ref() else {
         panic!("expected an Aggregate under the projection");
     };
-    assert_eq!(aggregates.len(), 2, "SUM(totalprice) and SUM(quantityordered)");
+    assert_eq!(
+        aggregates.len(),
+        2,
+        "SUM(totalprice) and SUM(quantityordered)"
+    );
     assert!(
-        aggregates.iter().all(|a| matches!(a.expr, Expr::Agg { .. })),
+        aggregates
+            .iter()
+            .all(|a| matches!(a.expr, Expr::Agg { .. })),
         "every measure must be a bare aggregate: {aggregates:?}"
     );
 
@@ -467,7 +507,12 @@ fn composite_metric_emits_project_over_aggregate() {
     // explicitly, then the metric.
     assert_eq!(project.expressions.len(), 2);
 
-    let emit = match project.common.expect("common").emit_kind.expect("emit_kind") {
+    let emit = match project
+        .common
+        .expect("common")
+        .emit_kind
+        .expect("emit_kind")
+    {
         substrait::proto::rel_common::EmitKind::Emit(e) => e.output_mapping,
         other => panic!("expected an explicit emit mapping, got {other:?}"),
     };
@@ -479,7 +524,11 @@ fn composite_metric_emits_project_over_aggregate() {
     let Some(RelType::Aggregate(agg)) = project.input.expect("project input").rel_type else {
         panic!("expected an AggregateRel under the projection");
     };
-    assert_eq!(agg.measures.len(), 2, "SUM(totalprice) and SUM(quantityordered)");
+    assert_eq!(
+        agg.measures.len(),
+        2,
+        "SUM(totalprice) and SUM(quantityordered)"
+    );
 }
 
 /// A metric mentioning the same aggregate twice yields one measure, not two.
@@ -542,7 +591,10 @@ fn simple_metric_emits_no_projection() {
         panic!("expected a root rel");
     };
     assert!(
-        matches!(root.input.expect("input").rel_type, Some(RelType::Aggregate(_))),
+        matches!(
+            root.input.expect("input").rel_type,
+            Some(RelType::Aggregate(_))
+        ),
         "a bare aggregate needs no projection"
     );
 }
@@ -581,7 +633,10 @@ metrics:
     let err = bind_query(&model, &spec).expect_err("the metric is unusable");
     let msg = err.to_string();
     assert!(msg.contains("window function"), "{msg}");
-    assert!(!msg.contains("not found"), "should not claim it is missing: {msg}");
+    assert!(
+        !msg.contains("not found"),
+        "should not claim it is missing: {msg}"
+    );
 
     // Strict callers can refuse the whole model.
     assert!(CompiledModel::compile_strict(&doc).is_err());
@@ -616,9 +671,18 @@ metrics:
 
     let targets: Vec<&IssueTarget> = model.issues.iter().map(|i| &i.target).collect();
     assert_eq!(targets.len(), 3, "{targets:?}");
-    assert!(targets.contains(&&IssueTarget::field("t", "bad_field")), "{targets:?}");
-    assert!(targets.contains(&&IssueTarget::metric("bad_metric_a")), "{targets:?}");
-    assert!(targets.contains(&&IssueTarget::metric("bad_metric_b")), "{targets:?}");
+    assert!(
+        targets.contains(&&IssueTarget::field("t", "bad_field")),
+        "{targets:?}"
+    );
+    assert!(
+        targets.contains(&&IssueTarget::metric("bad_metric_a")),
+        "{targets:?}"
+    );
+    assert!(
+        targets.contains(&&IssueTarget::metric("bad_metric_b")),
+        "{targets:?}"
+    );
 
     // The good field survives, so the rest of the model is still queryable.
     assert!(model.dataset("t").expect("dataset").field("ok").is_some());
@@ -669,7 +733,11 @@ metrics:
         ..Default::default()
     };
     let bound = bind_query(&model, &spec).expect("bind");
-    assert_eq!(bound.joins.len(), 1, "metric should require the customers join");
+    assert_eq!(
+        bound.joins.len(),
+        1,
+        "metric should require the customers join"
+    );
     assert_eq!(bound.joins[0].right_dataset, "customers");
 
     let plan = build_logical_plan(&bound, &model).expect("plan");
@@ -760,7 +828,8 @@ fn symbol_aliases_are_accepted() {
         ("eq_column", FilterOperator::EqField),
     ] {
         let json = format!(r#"{{"field":"fact.id","operator":"{spelling}","value":1}}"#);
-        let f: FilterSpec = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{spelling}: {e}"));
+        let f: FilterSpec =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{spelling}: {e}"));
         assert_eq!(f.operator, Some(expected), "{spelling}");
     }
 }
@@ -851,11 +920,9 @@ fn string_literals_are_escaped_per_dialect() {
 
     // BigQuery: backslash is an escape character, so it must be escaped too —
     // otherwise the trailing backslash would escape the closing quote.
-    let bq = ossie_substrait::emit::sql::to_sql_with(
-        &plan,
-        &ossie_substrait::sql_dialect::BigQuery,
-    )
-    .expect("bigquery sql");
+    let bq =
+        ossie_substrait::emit::sql::to_sql_with(&plan, &ossie_substrait::sql_dialect::BigQuery)
+            .expect("bigquery sql");
     assert!(bq.contains("'O\\'Brien\\\\'"), "{bq}");
 }
 
@@ -945,7 +1012,14 @@ metrics:
         .zip(types.into_iter().map(|t| t.kind.expect("kind")))
         .collect();
 
-    let kind = |n: &str| by_name.iter().find(|(name, _)| name == n).expect(n).1.clone();
+    let kind = |n: &str| {
+        by_name
+            .iter()
+            .find(|(name, _)| name == n)
+            .expect(n)
+            .1
+            .clone()
+    };
 
     assert!(matches!(kind("name"), Kind::String(_)));
     assert!(matches!(kind("qty"), Kind::I64(_)));
@@ -956,7 +1030,10 @@ metrics:
 
     // Under-specified in Ossie, so `unknown` rather than an invented parameterization.
     assert!(matches!(kind("amount"), Kind::UserDefined(_)), "Decimal");
-    assert!(matches!(kind("untyped"), Kind::UserDefined(_)), "no datatype");
+    assert!(
+        matches!(kind("untyped"), Kind::UserDefined(_)),
+        "no datatype"
+    );
 
     // The `unknown` type must be declared for those references to resolve.
     assert!(
@@ -972,8 +1049,8 @@ metrics:
 #[cfg(feature = "substrait")]
 #[test]
 fn scan_schema_does_not_default_everything_to_string() {
-    use substrait::proto::r#type::Kind;
     use substrait::proto::rel::RelType;
+    use substrait::proto::r#type::Kind;
 
     let plan = steelwheels_plan(&["sales"], &[]);
     let substrait_plan = to_plan(&plan).expect("substrait");
@@ -1020,15 +1097,21 @@ fn output_schema_describes_each_node() {
 
     // Aggregate: one column per grouping, then one per measure.
     let agg_schema = aggregate.output_schema();
-    assert_eq!(agg_schema.len(), 3, "1 grouping + 2 measures: {agg_schema:?}");
-    assert_eq!(agg_schema[0], ("dates".into(), "year_id".into()));
-    assert!(agg_schema[1].1.starts_with("__agg"), "{agg_schema:?}");
+    assert_eq!(
+        agg_schema.len(),
+        3,
+        "1 grouping + 2 measures: {agg_schema:?}"
+    );
+    assert_eq!(agg_schema[0].dataset, "dates");
+    assert_eq!(agg_schema[0].name, "year_id");
+    assert!(agg_schema[1].name.starts_with("__agg"), "{agg_schema:?}");
 
     // Project: exactly its named outputs, measures dropped.
     let out = plan.output_schema();
     assert_eq!(out.len(), 2, "{out:?}");
-    assert_eq!(out[1], (String::new(), "avg_unit_price".into()));
-    assert!(!out.iter().any(|(_, n)| n.starts_with("__agg")));
+    assert_eq!(out[1].name, "avg_unit_price");
+    assert!(out[1].dataset.is_empty());
+    assert!(!out.iter().any(|c| c.name.starts_with("__agg")));
 
     // The join under it concatenates its children.
     let LogicalPlan::Aggregate { input, .. } = aggregate else {
@@ -1073,5 +1156,155 @@ fn out_of_scope_columns_fail_at_plan_time() {
     let msg = err.to_string();
     assert!(msg.contains("not in scope"), "{msg}");
     assert!(msg.contains("t.nope"), "{msg}");
-    assert!(msg.contains("id"), "the available columns should be listed: {msg}");
+    assert!(
+        msg.contains("id"),
+        "the available columns should be listed: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Types flow through the plan, not just the scan.
+// ---------------------------------------------------------------------------
+
+fn typed_model() -> CompiledModel {
+    let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: t
+    source: s.t
+    fields:
+      - name: amount
+        datatype: Decimal
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: amount }]
+      - name: qty
+        datatype: Integer
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: qty }]
+      - name: label
+        datatype: String
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: label }]
+      - name: untyped
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: untyped }]
+metrics:
+  - name: total
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(t.amount)" }]
+  - name: n
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "COUNT(*)" }]
+  - name: mean_qty
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "AVG(t.qty)" }]
+  - name: ratio
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(t.amount) / COUNT(*)" }]
+  - name: over_untyped
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(t.untyped)" }]
+"#;
+    let doc = from_yaml_str(yaml).expect("parse");
+    CompiledModel::compile(&doc).expect("compile")
+}
+
+fn typed_plan(metrics: &[&str], group_by: &[&str]) -> LogicalPlan {
+    let model = typed_model();
+    let spec = SemanticQuery {
+        metrics: metrics.iter().map(|s| (*s).to_string()).collect(),
+        group_by: group_by.iter().map(|s| (*s).to_string()).collect(),
+        dataset: Some("t".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    build_logical_plan(&bound, &model).expect("plan")
+}
+
+fn column_type(plan: &LogicalPlan, name: &str) -> Option<DataType> {
+    plan.output_schema()
+        .into_iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("no column {name:?}"))
+        .datatype
+}
+
+/// An aggregate's type comes from the catalog row: SUM keeps its argument's
+/// type, COUNT is always Integer, AVG is always Float.
+#[test]
+fn aggregate_output_types_follow_the_catalog() {
+    let plan = typed_plan(&["total", "n", "mean_qty"], &[]);
+    assert_eq!(column_type(&plan, "total"), Some(DataType::Decimal));
+    assert_eq!(column_type(&plan, "n"), Some(DataType::Integer));
+    assert_eq!(column_type(&plan, "mean_qty"), Some(DataType::Float));
+}
+
+/// A grouping column keeps the type the model declared for it, through the
+/// aggregate.
+#[test]
+fn grouping_columns_keep_their_declared_type() {
+    let plan = typed_plan(&["n"], &["t.label"]);
+    assert_eq!(column_type(&plan, "label"), Some(DataType::String));
+}
+
+/// A composite metric is typed through the projection: Decimal / Integer
+/// widens to Decimal.
+#[test]
+fn projected_types_are_inferred_through_the_projection() {
+    let plan = typed_plan(&["ratio"], &[]);
+    assert!(matches!(plan, LogicalPlan::Project { .. }));
+    assert_eq!(column_type(&plan, "ratio"), Some(DataType::Decimal));
+}
+
+/// Ossie makes `datatype` optional, so an unknown input stays unknown rather
+/// than becoming a guess.
+#[test]
+fn unknown_input_types_stay_unknown() {
+    let plan = typed_plan(&["over_untyped"], &["t.untyped"]);
+    assert_eq!(column_type(&plan, "over_untyped"), None);
+    assert_eq!(column_type(&plan, "untyped"), None);
+}
+
+/// A known measure type reaches the Substrait plan; an unknown one is left
+/// absent rather than declared wrongly.
+#[cfg(feature = "substrait")]
+#[test]
+fn substrait_measures_declare_known_types_only() {
+    use substrait::proto::rel::RelType;
+    use substrait::proto::r#type::Kind;
+
+    let measures = |metric: &str| {
+        let plan = typed_plan(&[metric], &[]);
+        let substrait_plan = to_plan(&plan).expect("substrait");
+        let substrait::proto::plan_rel::RelType::Root(root) =
+            substrait_plan.relations[0].rel_type.clone().expect("rel")
+        else {
+            panic!("expected a root rel");
+        };
+        let Some(RelType::Aggregate(agg)) = root.input.expect("input").rel_type else {
+            panic!("expected an aggregate");
+        };
+        agg.measures
+    };
+
+    // COUNT is Integer whatever it counts.
+    let out = measures("n")[0].measure.clone().expect("fn").output_type;
+    assert!(matches!(out.and_then(|t| t.kind), Some(Kind::I64(_))));
+
+    // AVG is Float.
+    let out = measures("mean_qty")[0]
+        .measure
+        .clone()
+        .expect("fn")
+        .output_type;
+    assert!(matches!(out.and_then(|t| t.kind), Some(Kind::Fp64(_))));
+
+    // SUM over an undeclared column: no claim.
+    let out = measures("over_untyped")[0]
+        .measure
+        .clone()
+        .expect("fn")
+        .output_type;
+    assert!(out.is_none(), "an unknown type must not be declared");
 }

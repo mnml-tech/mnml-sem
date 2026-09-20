@@ -51,9 +51,33 @@ pub enum LogicalPlan {
     },
 }
 
-/// A column produced by a plan node: its dataset (empty when the node
-/// synthesized it) and its name.
-pub type SchemaColumn = (String, String);
+/// A column produced by a plan node.
+///
+/// `datatype` is whatever is known: declared on the model for a scanned
+/// column, inferred through the catalog for a computed one, and `None` where
+/// Ossie does not say — `datatype` is optional in the core spec, so an unknown
+/// type stays unknown rather than becoming a guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaColumn {
+    /// Logical dataset, empty when the node synthesized the column.
+    pub dataset: String,
+    pub name: String,
+    pub datatype: Option<DataType>,
+}
+
+impl SchemaColumn {
+    pub fn new(
+        dataset: impl Into<String>,
+        name: impl Into<String>,
+        datatype: Option<DataType>,
+    ) -> Self {
+        Self {
+            dataset: dataset.into(),
+            name: name.into(),
+            datatype,
+        }
+    }
+}
 
 impl LogicalPlan {
     /// The columns this node produces, in order.
@@ -67,7 +91,7 @@ impl LogicalPlan {
                 dataset, columns, ..
             } => columns
                 .iter()
-                .map(|c| (dataset.clone(), c.name.clone()))
+                .map(|c| SchemaColumn::new(dataset, &c.name, c.datatype))
                 .collect(),
             LogicalPlan::Join { left, right, .. } => {
                 let mut out = left.output_schema();
@@ -76,32 +100,46 @@ impl LogicalPlan {
             }
             LogicalPlan::Filter { input, .. } => input.output_schema(),
             LogicalPlan::Aggregate {
+                input,
                 group_by,
                 aggregates,
-                ..
             } => {
                 // One output per grouping, then one per measure. A grouping
                 // that is not a plain column still takes a slot, or every
                 // measure index below it shifts.
+                let inner = input.output_schema();
                 let mut out: Vec<SchemaColumn> = group_by
                     .iter()
                     .enumerate()
-                    .map(|(i, e)| match e {
-                        Expr::Column(c) => (c.dataset.clone(), c.column.clone()),
-                        _ => (String::new(), format!("__group{i}")),
+                    .map(|(i, e)| {
+                        let ty = e.result_type(&inner);
+                        match e {
+                            Expr::Column(c) => SchemaColumn::new(&c.dataset, &c.column, ty),
+                            _ => SchemaColumn::new("", format!("__group{i}"), ty),
+                        }
                     })
                     .collect();
-                out.extend(aggregates.iter().map(|a| (String::new(), a.name.clone())));
+                out.extend(
+                    aggregates
+                        .iter()
+                        .map(|a| SchemaColumn::new("", &a.name, a.expr.result_type(&inner))),
+                );
                 out
             }
-            LogicalPlan::Project { exprs, .. } => exprs
-                .iter()
-                .map(|e| match &e.expr {
-                    // A pass-through column keeps its identity.
-                    Expr::Column(c) => (c.dataset.clone(), c.column.clone()),
-                    _ => (String::new(), e.name.clone()),
-                })
-                .collect(),
+            LogicalPlan::Project { input, exprs } => {
+                let inner = input.output_schema();
+                exprs
+                    .iter()
+                    .map(|e| {
+                        let ty = e.expr.result_type(&inner);
+                        match &e.expr {
+                            // A pass-through column keeps its identity.
+                            Expr::Column(c) => SchemaColumn::new(&c.dataset, &c.column, ty),
+                            _ => SchemaColumn::new("", &e.name, ty),
+                        }
+                    })
+                    .collect()
+            }
         }
     }
 }
@@ -112,9 +150,11 @@ impl LogicalPlan {
 /// single-source query refers to its columns.
 pub fn find_column(schema: &[SchemaColumn], dataset: &str, column: &str) -> Option<usize> {
     if dataset.is_empty() {
-        return schema.iter().position(|(_, c)| c == column);
+        return schema.iter().position(|c| c.name == column);
     }
-    schema.iter().position(|(d, c)| d == dataset && c == column)
+    schema
+        .iter()
+        .position(|c| c.dataset == dataset && c.name == column)
 }
 
 /// A column exposed by a [`LogicalPlan::Scan`].

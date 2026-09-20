@@ -6,6 +6,8 @@
 //! Adding or changing a function is a single edit to [`CATALOG`], which keeps the
 //! two emitters aligned by construction.
 
+use crate::model::DataType;
+
 /// A Substrait simple-extension group, identified by an anchor and its URN.
 ///
 /// The anchor is the `extension_urn_anchor` referenced by every function declared
@@ -72,6 +74,60 @@ impl Arity {
             Arity::Exact(k) => n == k,
             Arity::AtLeast(k) => n >= k,
         }
+    }
+}
+
+/// What a function returns, in terms of its arguments.
+///
+/// Ossie's `datatype` is optional, so an unknown argument type stays unknown
+/// rather than becoming a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnType {
+    /// Always this type, whatever the arguments — comparisons are `Boolean`.
+    Fixed(DataType),
+    /// The type of argument `n` — `MIN`, `MAX`, `ABS`.
+    SameAsArg(usize),
+    /// The widest numeric argument — `+`, `-`, `*`, `/`.
+    Numeric,
+    /// The first argument with a known type — `COALESCE`.
+    FirstKnown,
+    /// Not determinable here.
+    Unknown,
+}
+
+impl ReturnType {
+    /// Resolve against the argument types, `None` where any input is unknown.
+    pub fn resolve(self, args: &[Option<DataType>]) -> Option<DataType> {
+        match self {
+            ReturnType::Fixed(t) => Some(t),
+            ReturnType::SameAsArg(n) => args.get(n).copied().flatten(),
+            ReturnType::FirstKnown => args.iter().find_map(|a| *a),
+            ReturnType::Numeric => args
+                .iter()
+                .copied()
+                .try_fold(None::<DataType>, |acc, arg| match (acc, arg?) {
+                    (None, t) => Some(Some(t)),
+                    (Some(a), b) => Some(Some(wider_numeric(a, b))),
+                })
+                .flatten(),
+            ReturnType::Unknown => None,
+        }
+    }
+}
+
+/// The type that holds both, for the numeric tower Ossie can express.
+///
+/// `Float` is approximate so it absorbs everything; `Decimal` is exact and
+/// wider than `Integer`. A non-numeric operand makes the result unknown.
+fn wider_numeric(a: DataType, b: DataType) -> DataType {
+    use DataType::{Decimal, Float, Integer};
+    match (a, b) {
+        (Float, _) | (_, Float) => Float,
+        (Decimal, _) | (_, Decimal) => Decimal,
+        (Integer, Integer) => Integer,
+        // Date arithmetic and anything else: keep the left operand's type,
+        // which is what `DATEDIFF`'s own row overrides anyway.
+        (other, _) => other,
     }
 }
 
@@ -147,6 +203,8 @@ pub struct FuncDef {
     pub name: &'static str,
     /// ANSI SQL rendering.
     pub sql: SqlForm,
+    /// The type this function produces.
+    pub returns: ReturnType,
     /// SQL spellings that parse to this function.
     ///
     /// Empty for operators, which the parser reports structurally rather than
@@ -187,6 +245,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 1,
         name: "sum",
         sql: SqlForm::Call("SUM"),
+        returns: ReturnType::SameAsArg(0),
         sql_names: &["SUM"],
     },
     FuncDef {
@@ -197,6 +256,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 2,
         name: "avg",
         sql: SqlForm::Call("AVG"),
+        returns: ReturnType::Fixed(DataType::Float),
         sql_names: &["AVG"],
     },
     FuncDef {
@@ -207,6 +267,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 3,
         name: "count",
         sql: SqlForm::Call("COUNT"),
+        returns: ReturnType::Fixed(DataType::Integer),
         sql_names: &["COUNT"],
     },
     FuncDef {
@@ -217,6 +278,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 5,
         name: "min",
         sql: SqlForm::Call("MIN"),
+        returns: ReturnType::SameAsArg(0),
         sql_names: &["MIN"],
     },
     FuncDef {
@@ -227,6 +289,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 6,
         name: "max",
         sql: SqlForm::Call("MAX"),
+        returns: ReturnType::SameAsArg(0),
         sql_names: &["MAX"],
     },
     FuncDef {
@@ -237,6 +300,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 100,
         name: "equal",
         sql: SqlForm::Infix("="),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -247,6 +311,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 101,
         name: "not_equal",
         sql: SqlForm::Infix("<>"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -257,6 +322,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 102,
         name: "lt",
         sql: SqlForm::Infix("<"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -267,6 +333,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 103,
         name: "lte",
         sql: SqlForm::Infix("<="),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -277,6 +344,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 104,
         name: "gt",
         sql: SqlForm::Infix(">"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -287,6 +355,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 105,
         name: "gte",
         sql: SqlForm::Infix(">="),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -297,6 +366,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 106,
         name: "is_null",
         sql: SqlForm::Postfix("IS NULL"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -307,6 +377,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 107,
         name: "is_not_null",
         sql: SqlForm::Postfix("IS NOT NULL"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -317,6 +388,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 108,
         name: "coalesce",
         sql: SqlForm::Call("COALESCE"),
+        returns: ReturnType::FirstKnown,
         sql_names: &["COALESCE"],
     },
     FuncDef {
@@ -327,6 +399,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 109,
         name: "nullif",
         sql: SqlForm::Call("NULLIF"),
+        returns: ReturnType::SameAsArg(0),
         sql_names: &["NULLIF"],
     },
     FuncDef {
@@ -337,6 +410,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 200,
         name: "and",
         sql: SqlForm::Variadic("AND"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -347,6 +421,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 201,
         name: "or",
         sql: SqlForm::Variadic("OR"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -357,6 +432,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 202,
         name: "not",
         sql: SqlForm::Prefix("NOT"),
+        returns: ReturnType::Fixed(DataType::Boolean),
         sql_names: &[],
     },
     FuncDef {
@@ -367,6 +443,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 300,
         name: "add",
         sql: SqlForm::InfixParen("+"),
+        returns: ReturnType::Numeric,
         sql_names: &[],
     },
     FuncDef {
@@ -377,6 +454,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 301,
         name: "subtract",
         sql: SqlForm::InfixParen("-"),
+        returns: ReturnType::Numeric,
         sql_names: &[],
     },
     FuncDef {
@@ -387,6 +465,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 302,
         name: "multiply",
         sql: SqlForm::InfixParen("*"),
+        returns: ReturnType::Numeric,
         sql_names: &[],
     },
     FuncDef {
@@ -397,6 +476,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 303,
         name: "divide",
         sql: SqlForm::InfixParen("/"),
+        returns: ReturnType::Numeric,
         sql_names: &[],
     },
     FuncDef {
@@ -407,6 +487,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 304,
         name: "abs",
         sql: SqlForm::Call("ABS"),
+        returns: ReturnType::SameAsArg(0),
         sql_names: &["ABS"],
     },
     FuncDef {
@@ -417,6 +498,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 305,
         name: "power",
         sql: SqlForm::Call("POWER"),
+        returns: ReturnType::Fixed(DataType::Float),
         sql_names: &["POWER"],
     },
     FuncDef {
@@ -427,6 +509,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 306,
         name: "sqrt",
         sql: SqlForm::Call("SQRT"),
+        returns: ReturnType::Fixed(DataType::Float),
         sql_names: &["SQRT"],
     },
     FuncDef {
@@ -437,6 +520,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 400,
         name: "current_date",
         sql: SqlForm::Keyword("CURRENT_DATE"),
+        returns: ReturnType::Fixed(DataType::Date),
         sql_names: &["CURRENT_DATE"],
     },
     FuncDef {
@@ -447,6 +531,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 500,
         name: "concat",
         sql: SqlForm::Variadic("||"),
+        returns: ReturnType::Fixed(DataType::String),
         sql_names: &["CONCAT"],
     },
     FuncDef {
@@ -457,6 +542,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 501,
         name: "lower",
         sql: SqlForm::Call("LOWER"),
+        returns: ReturnType::Fixed(DataType::String),
         sql_names: &["LOWER"],
     },
     FuncDef {
@@ -467,6 +553,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 502,
         name: "upper",
         sql: SqlForm::Call("UPPER"),
+        returns: ReturnType::Fixed(DataType::String),
         sql_names: &["UPPER"],
     },
     FuncDef {
@@ -477,6 +564,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 503,
         name: "trim",
         sql: SqlForm::Call("TRIM"),
+        returns: ReturnType::Fixed(DataType::String),
         sql_names: &["TRIM"],
     },
     FuncDef {
@@ -487,6 +575,7 @@ pub const CATALOG: &[FuncDef] = &[
         anchor: 307,
         name: "subtract",
         sql: SqlForm::InfixParen("-"),
+        returns: ReturnType::Fixed(DataType::Integer),
         sql_names: &["DATEDIFF", "DATE_DIFF"],
     },
 ];
