@@ -1,103 +1,107 @@
 //! Build a [`LogicalPlan`](crate::plan::LogicalPlan) from a [`BoundQuery`](crate::resolver::BoundQuery) (verb).
+//!
+//! Expressions arrive already lowered by [`CompiledModel`](crate::compiled::CompiledModel),
+//! so this module only assembles plan nodes.
 
-use crate::model::{Metric, SemanticModel};
-use crate::plan::mnml::{field_to_expr, metric_to_expr, physical_column_for_field};
-use crate::plan::{
-    Expr, Literal, LogicalPlan, NamedAggregate, parse_metric_sql, pick_expression_sql,
-};
+use crate::compiled::CompiledModel;
+use crate::plan::{Expr, Literal, LogicalPlan, NamedAggregate, ScanColumn};
 use crate::resolver::{BoundQuery, QueryError, ResolvedField};
 
-fn field_expr(rf: &ResolvedField, model: &SemanticModel) -> Result<Expr, QueryError> {
-    if let Some(expr) = field_to_expr(&rf.field, &rf.dataset, model)? {
-        return Ok(expr);
-    }
-    let sql = pick_expression_sql(&rf.field.expression).ok_or(QueryError::MissingExpressionSql)?;
-    Ok(Expr::column(rf.dataset.clone(), sql))
+/// A group-by or filter field, qualified by its dataset.
+fn field_expr(rf: &ResolvedField) -> Expr {
+    rf.field.expr.clone()
 }
 
-fn metric_expr(m: &Metric, model: &SemanticModel) -> Result<Expr, QueryError> {
-    if let Some(expr) = metric_to_expr(m, model)? {
-        return Ok(expr);
-    }
-    let sql = pick_expression_sql(&m.expression).ok_or(QueryError::MissingExpressionSql)?;
-    Ok(parse_metric_sql(&sql))
-}
-
-fn dataset_columns(model: &SemanticModel, dataset_name: &str) -> Result<Vec<String>, QueryError> {
+fn dataset_columns(
+    model: &CompiledModel,
+    dataset_name: &str,
+) -> Result<Vec<ScanColumn>, QueryError> {
     let ds = model
-        .datasets
-        .iter()
-        .find(|d| d.name == dataset_name)
+        .dataset(dataset_name)
         .ok_or_else(|| QueryError::DatasetNotFound(dataset_name.to_string()))?;
-    let mut cols = Vec::new();
-    for f in &ds.fields {
-        if let Ok(name) = physical_column_for_field(model, dataset_name, &f.name) {
-            if !cols.contains(&name) {
-                cols.push(name);
-            }
-        }
-    }
+    let cols: Vec<ScanColumn> = ds
+        .scan_columns()
+        .into_iter()
+        .map(|(name, datatype)| ScanColumn::new(name, datatype))
+        .collect();
     if cols.is_empty() {
-        return Err(QueryError::InvalidMnmlExpression(format!(
+        return Err(QueryError::InvalidExpression(format!(
             "dataset {dataset_name:?} has no physical columns for scan"
         )));
     }
     Ok(cols)
 }
 
-fn filter_to_expr(
-    f: &crate::resolver::BoundFilter,
-    qualify: bool,
-    model: &SemanticModel,
-) -> Result<Expr, QueryError> {
-    let left = field_expr(&f.field, model)?;
-    if matches!(f.operator.as_str(), "eq_field" | "eq_column") {
-        let rhs = f.rhs_field.as_ref().ok_or_else(|| {
-            QueryError::InvalidFieldRef(
-                "eq_field / eq_column filter missing RHS field binding".to_string(),
-            )
-        })?;
-        return Ok(Expr::Eq(
-            Box::new(qualify_column(left, qualify)),
-            Box::new(qualify_column(field_expr(rhs, model)?, qualify)),
-        ));
-    }
-    let op = f.operator.as_str();
-    let left_q = qualify_column(left, qualify);
-    match op {
-        "in" if f.value.is_array() => {
-            let values: Vec<Literal> = f
-                .value
-                .as_array()
-                .expect("is_array")
-                .iter()
-                .map(Literal::from_json)
-                .collect();
-            Ok(Expr::In {
-                expr: Box::new(left_q),
-                values,
+fn filter_to_expr(f: &crate::resolver::BoundFilter, qualify: bool) -> Result<Expr, QueryError> {
+    use crate::catalog::Func;
+    use crate::query::FilterOperator as Op;
+
+    let lhs = qualify_column(field_expr(&f.field), qualify);
+
+    let invalid = |reason: String| QueryError::InvalidFilter {
+        field: f.field.field.name.clone(),
+        reason,
+    };
+
+    // A single literal operand, for the comparison operators.
+    let literal = || -> Result<Expr, QueryError> {
+        Literal::from_json(&f.value)
+            .map(Expr::Literal)
+            .ok_or_else(|| invalid(format!("{} is not a scalar value", f.value)))
+    };
+
+    // A literal list, for the set operators.
+    let values = || -> Result<Vec<Literal>, QueryError> {
+        let items = f
+            .value
+            .as_array()
+            .ok_or_else(|| invalid("expects an array value".to_string()))?;
+        items
+            .iter()
+            .map(|v| {
+                Literal::from_json(v).ok_or_else(|| invalid(format!("{v} is not a scalar value")))
             })
+            .collect()
+    };
+
+    let compare = |func: Func| -> Result<Expr, QueryError> {
+        Ok(Expr::binary(func, lhs.clone(), literal()?))
+    };
+
+    Ok(match f.operator {
+        Op::Eq => compare(Func::Equal)?,
+        Op::Ne => compare(Func::NotEqual)?,
+        Op::Lt => compare(Func::LessThan)?,
+        Op::Lte => compare(Func::LessThanOrEqual)?,
+        Op::Gt => compare(Func::GreaterThan)?,
+        Op::Gte => compare(Func::GreaterThanOrEqual)?,
+        Op::In => Expr::InList {
+            expr: Box::new(lhs),
+            values: values()?,
+        },
+        Op::NotIn => Expr::call(
+            Func::Not,
+            vec![Expr::InList {
+                expr: Box::new(lhs),
+                values: values()?,
+            }],
+        ),
+        Op::IsNull => Expr::call(Func::IsNull, vec![lhs]),
+        Op::IsNotNull => Expr::call(Func::IsNotNull, vec![lhs]),
+        Op::EqField => {
+            let rhs = f.rhs_field.as_ref().ok_or_else(|| {
+                invalid("eq_field is missing its right-hand field binding".to_string())
+            })?;
+            Expr::binary(Func::Equal, lhs, qualify_column(field_expr(rhs), qualify))
         }
-        "eq" | "=" => Ok(Expr::Eq(
-            Box::new(left_q),
-            Box::new(Expr::Literal(Literal::from_json(&f.value))),
-        )),
-        "ne" | "!=" => Ok(Expr::Ne(
-            Box::new(left_q),
-            Box::new(Expr::Literal(Literal::from_json(&f.value))),
-        )),
-        _ => Ok(Expr::Eq(
-            Box::new(left_q),
-            Box::new(Expr::Literal(Literal::from_json(&f.value))),
-        )),
-    }
+    })
 }
 
 fn qualify_column(expr: Expr, qualify: bool) -> Expr {
     if qualify {
         expr
     } else if let Expr::Column(c) = expr {
-        Expr::column("", c.sql)
+        Expr::column("", c.column)
     } else {
         expr
     }
@@ -106,7 +110,7 @@ fn qualify_column(expr: Expr, qualify: bool) -> Expr {
 /// Build a plan: scan (and joins) → optional combined filter → aggregate.
 pub fn build_logical_plan(
     bound: &BoundQuery,
-    model: &SemanticModel,
+    model: &CompiledModel,
 ) -> Result<LogicalPlan, QueryError> {
     let qualify = bound.sources.len() > 1;
 
@@ -149,7 +153,7 @@ pub fn build_logical_plan(
         let parts: Vec<Expr> = bound
             .filters
             .iter()
-            .map(|f| filter_to_expr(f, qualify, model))
+            .map(|f| filter_to_expr(f, qualify))
             .collect::<Result<_, _>>()?;
         LogicalPlan::Filter {
             input: Box::new(plan),
@@ -159,7 +163,7 @@ pub fn build_logical_plan(
 
     let mut group_by = Vec::with_capacity(bound.group_by.len());
     for f in &bound.group_by {
-        group_by.push(qualify_column(field_expr(f, model)?, qualify));
+        group_by.push(qualify_column(field_expr(f), qualify));
     }
 
     let aggregates: Vec<NamedAggregate> = bound
@@ -168,10 +172,10 @@ pub fn build_logical_plan(
         .map(|m| {
             Ok(NamedAggregate {
                 name: m.name.clone(),
-                expr: metric_expr(m, model)?,
+                expr: m.expr.clone(),
             })
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, QueryError>>()?;
 
     Ok(LogicalPlan::Aggregate {
         input: Box::new(after_filter),

@@ -1,6 +1,7 @@
 //! Model-level metrics (`$defs.Metric`).
 
 use super::ai_context::AiContext;
+use super::enums::DataType;
 use super::expression::Expression;
 use super::extensions::CustomExtension;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,9 @@ pub struct Metric {
     pub expression: Expression,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Logical value type. Omit when unknown or unspecified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datatype: Option<DataType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_context: Option<AiContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

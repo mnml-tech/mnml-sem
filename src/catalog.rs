@@ -36,6 +36,44 @@ pub const DATETIME: ExtensionGroup = ExtensionGroup {
     anchor: 5,
     urn: "extension:io.substrait:functions_datetime",
 };
+pub const STRING: ExtensionGroup = ExtensionGroup {
+    anchor: 6,
+    urn: "extension:io.substrait:functions_string",
+};
+
+/// Substrait's `unknown` type, for columns whose type the model does not
+/// declare. Not a function group, so it is declared separately from [`CATALOG`].
+pub const UNKNOWN_TYPE: ExtensionGroup = ExtensionGroup {
+    anchor: 7,
+    urn: "extension:io.substrait:unknown",
+};
+
+/// `type_anchor` for [`UNKNOWN_TYPE`]'s single type. Type anchors are a
+/// separate namespace from function anchors.
+pub const UNKNOWN_TYPE_ANCHOR: u32 = 1;
+
+/// Whether a function aggregates rows or maps values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuncKind {
+    Scalar,
+    Aggregate,
+}
+
+/// How many arguments a function accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arity {
+    Exact(usize),
+    AtLeast(usize),
+}
+
+impl Arity {
+    pub fn accepts(self, n: usize) -> bool {
+        match self {
+            Arity::Exact(k) => n == k,
+            Arity::AtLeast(k) => n >= k,
+        }
+    }
+}
 
 /// Logical function identity, independent of any target dialect or IR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,10 +85,31 @@ pub enum Func {
     Max,
     Equal,
     NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    IsNull,
+    IsNotNull,
+    Coalesce,
+    NullIf,
     And,
     Or,
+    Not,
+    Add,
     Subtract,
+    Multiply,
+    Divide,
+    Abs,
+    Power,
+    Sqrt,
+    Concat,
+    Lower,
+    Upper,
+    Trim,
     CurrentDate,
+    /// Difference between two dates in days.
+    DateDiff,
 }
 
 /// How a function renders in ANSI SQL. Tokens are bare operators; the formatter
@@ -67,12 +126,20 @@ pub enum SqlForm {
     Call(&'static str),
     /// `NAME` — niladic keyword, e.g. `CURRENT_DATE`.
     Keyword(&'static str),
+    /// `OP a` — prefix operator, e.g. `NOT`.
+    Prefix(&'static str),
+    /// `a OP` — postfix operator, e.g. `IS NULL`.
+    Postfix(&'static str),
 }
 
 /// A single function entry: its Substrait coordinates and SQL rendering.
 #[derive(Debug, Clone, Copy)]
 pub struct FuncDef {
     pub func: Func,
+    /// Aggregate functions become Substrait measures; scalars become
+    /// `ScalarFunction` expressions.
+    pub kind: FuncKind,
+    pub arity: Arity,
     pub group: ExtensionGroup,
     /// Substrait `function_anchor` / `function_reference`.
     pub anchor: u32,
@@ -80,32 +147,348 @@ pub struct FuncDef {
     pub name: &'static str,
     /// ANSI SQL rendering.
     pub sql: SqlForm,
+    /// SQL spellings that parse to this function.
+    ///
+    /// Empty for operators, which the parser reports structurally rather than
+    /// by name. A function listed here is reachable from model expressions the
+    /// moment it appears in [`CATALOG`].
+    pub sql_names: &'static [&'static str],
 }
 
 impl FuncDef {
-    /// SQL call name for [`SqlForm::Call`] functions (e.g. aggregates); panics otherwise.
-    pub fn call_name(&self) -> &'static str {
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self.kind, FuncKind::Aggregate)
+    }
+
+    /// The SQL call name, for functions rendered as `NAME(args)`.
+    pub fn name_for_sql(&self) -> &'static str {
         match self.sql {
-            SqlForm::Call(name) => name,
-            _ => panic!("{:?} is not a SQL call function", self.func),
+            SqlForm::Call(name) | SqlForm::Keyword(name) => name,
+            _ => self.sql_names.first().copied().unwrap_or(self.name),
         }
     }
+}
+
+/// Look up a function by a SQL spelling, case-insensitively.
+pub fn by_sql_name(name: &str) -> Option<&'static FuncDef> {
+    CATALOG
+        .iter()
+        .find(|d| d.sql_names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
 /// Every supported function. Order matters: it fixes the order of emitted
 /// Substrait extension declarations.
 pub const CATALOG: &[FuncDef] = &[
-    FuncDef { func: Func::Sum, group: AGGREGATE, anchor: 1, name: "sum", sql: SqlForm::Call("SUM") },
-    FuncDef { func: Func::Avg, group: AGGREGATE, anchor: 2, name: "avg", sql: SqlForm::Call("AVG") },
-    FuncDef { func: Func::Count, group: AGGREGATE, anchor: 3, name: "count", sql: SqlForm::Call("COUNT") },
-    FuncDef { func: Func::Min, group: AGGREGATE, anchor: 5, name: "min", sql: SqlForm::Call("MIN") },
-    FuncDef { func: Func::Max, group: AGGREGATE, anchor: 6, name: "max", sql: SqlForm::Call("MAX") },
-    FuncDef { func: Func::Equal, group: COMPARISON, anchor: 100, name: "equal", sql: SqlForm::Infix("=") },
-    FuncDef { func: Func::NotEqual, group: COMPARISON, anchor: 101, name: "not_equal", sql: SqlForm::Infix("<>") },
-    FuncDef { func: Func::And, group: BOOLEAN, anchor: 200, name: "and", sql: SqlForm::Variadic("AND") },
-    FuncDef { func: Func::Or, group: BOOLEAN, anchor: 201, name: "or", sql: SqlForm::Variadic("OR") },
-    FuncDef { func: Func::Subtract, group: ARITHMETIC, anchor: 300, name: "subtract", sql: SqlForm::InfixParen("-") },
-    FuncDef { func: Func::CurrentDate, group: DATETIME, anchor: 400, name: "current_date", sql: SqlForm::Keyword("CURRENT_DATE") },
+    FuncDef {
+        func: Func::Sum,
+        kind: FuncKind::Aggregate,
+        arity: Arity::Exact(1),
+        group: AGGREGATE,
+        anchor: 1,
+        name: "sum",
+        sql: SqlForm::Call("SUM"),
+        sql_names: &["SUM"],
+    },
+    FuncDef {
+        func: Func::Avg,
+        kind: FuncKind::Aggregate,
+        arity: Arity::Exact(1),
+        group: AGGREGATE,
+        anchor: 2,
+        name: "avg",
+        sql: SqlForm::Call("AVG"),
+        sql_names: &["AVG"],
+    },
+    FuncDef {
+        func: Func::Count,
+        kind: FuncKind::Aggregate,
+        arity: Arity::AtLeast(0),
+        group: AGGREGATE,
+        anchor: 3,
+        name: "count",
+        sql: SqlForm::Call("COUNT"),
+        sql_names: &["COUNT"],
+    },
+    FuncDef {
+        func: Func::Min,
+        kind: FuncKind::Aggregate,
+        arity: Arity::Exact(1),
+        group: AGGREGATE,
+        anchor: 5,
+        name: "min",
+        sql: SqlForm::Call("MIN"),
+        sql_names: &["MIN"],
+    },
+    FuncDef {
+        func: Func::Max,
+        kind: FuncKind::Aggregate,
+        arity: Arity::Exact(1),
+        group: AGGREGATE,
+        anchor: 6,
+        name: "max",
+        sql: SqlForm::Call("MAX"),
+        sql_names: &["MAX"],
+    },
+    FuncDef {
+        func: Func::Equal,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 100,
+        name: "equal",
+        sql: SqlForm::Infix("="),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::NotEqual,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 101,
+        name: "not_equal",
+        sql: SqlForm::Infix("<>"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::LessThan,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 102,
+        name: "lt",
+        sql: SqlForm::Infix("<"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::LessThanOrEqual,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 103,
+        name: "lte",
+        sql: SqlForm::Infix("<="),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::GreaterThan,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 104,
+        name: "gt",
+        sql: SqlForm::Infix(">"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::GreaterThanOrEqual,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 105,
+        name: "gte",
+        sql: SqlForm::Infix(">="),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::IsNull,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: COMPARISON,
+        anchor: 106,
+        name: "is_null",
+        sql: SqlForm::Postfix("IS NULL"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::IsNotNull,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: COMPARISON,
+        anchor: 107,
+        name: "is_not_null",
+        sql: SqlForm::Postfix("IS NOT NULL"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Coalesce,
+        kind: FuncKind::Scalar,
+        arity: Arity::AtLeast(1),
+        group: COMPARISON,
+        anchor: 108,
+        name: "coalesce",
+        sql: SqlForm::Call("COALESCE"),
+        sql_names: &["COALESCE"],
+    },
+    FuncDef {
+        func: Func::NullIf,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: COMPARISON,
+        anchor: 109,
+        name: "nullif",
+        sql: SqlForm::Call("NULLIF"),
+        sql_names: &["NULLIF"],
+    },
+    FuncDef {
+        func: Func::And,
+        kind: FuncKind::Scalar,
+        arity: Arity::AtLeast(2),
+        group: BOOLEAN,
+        anchor: 200,
+        name: "and",
+        sql: SqlForm::Variadic("AND"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Or,
+        kind: FuncKind::Scalar,
+        arity: Arity::AtLeast(2),
+        group: BOOLEAN,
+        anchor: 201,
+        name: "or",
+        sql: SqlForm::Variadic("OR"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Not,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: BOOLEAN,
+        anchor: 202,
+        name: "not",
+        sql: SqlForm::Prefix("NOT"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Add,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: ARITHMETIC,
+        anchor: 300,
+        name: "add",
+        sql: SqlForm::InfixParen("+"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Subtract,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: ARITHMETIC,
+        anchor: 301,
+        name: "subtract",
+        sql: SqlForm::InfixParen("-"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Multiply,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: ARITHMETIC,
+        anchor: 302,
+        name: "multiply",
+        sql: SqlForm::InfixParen("*"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Divide,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: ARITHMETIC,
+        anchor: 303,
+        name: "divide",
+        sql: SqlForm::InfixParen("/"),
+        sql_names: &[],
+    },
+    FuncDef {
+        func: Func::Abs,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: ARITHMETIC,
+        anchor: 304,
+        name: "abs",
+        sql: SqlForm::Call("ABS"),
+        sql_names: &["ABS"],
+    },
+    FuncDef {
+        func: Func::Power,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: ARITHMETIC,
+        anchor: 305,
+        name: "power",
+        sql: SqlForm::Call("POWER"),
+        sql_names: &["POWER"],
+    },
+    FuncDef {
+        func: Func::Sqrt,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: ARITHMETIC,
+        anchor: 306,
+        name: "sqrt",
+        sql: SqlForm::Call("SQRT"),
+        sql_names: &["SQRT"],
+    },
+    FuncDef {
+        func: Func::CurrentDate,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(0),
+        group: DATETIME,
+        anchor: 400,
+        name: "current_date",
+        sql: SqlForm::Keyword("CURRENT_DATE"),
+        sql_names: &["CURRENT_DATE"],
+    },
+    FuncDef {
+        func: Func::Concat,
+        kind: FuncKind::Scalar,
+        arity: Arity::AtLeast(1),
+        group: STRING,
+        anchor: 500,
+        name: "concat",
+        sql: SqlForm::Variadic("||"),
+        sql_names: &["CONCAT"],
+    },
+    FuncDef {
+        func: Func::Lower,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: STRING,
+        anchor: 501,
+        name: "lower",
+        sql: SqlForm::Call("LOWER"),
+        sql_names: &["LOWER"],
+    },
+    FuncDef {
+        func: Func::Upper,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: STRING,
+        anchor: 502,
+        name: "upper",
+        sql: SqlForm::Call("UPPER"),
+        sql_names: &["UPPER"],
+    },
+    FuncDef {
+        func: Func::Trim,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(1),
+        group: STRING,
+        anchor: 503,
+        name: "trim",
+        sql: SqlForm::Call("TRIM"),
+        sql_names: &["TRIM"],
+    },
+    FuncDef {
+        func: Func::DateDiff,
+        kind: FuncKind::Scalar,
+        arity: Arity::Exact(2),
+        group: ARITHMETIC,
+        anchor: 307,
+        name: "subtract",
+        sql: SqlForm::InfixParen("-"),
+        sql_names: &["DATEDIFF", "DATE_DIFF"],
+    },
 ];
 
 /// Look up a function's definition.
@@ -143,7 +526,7 @@ mod tests {
         let groups = extension_groups();
         assert_eq!(
             groups.iter().map(|g| g.anchor).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5]
+            vec![1, 2, 3, 4, 5, 6]
         );
     }
 
@@ -151,7 +534,11 @@ mod tests {
     fn anchors_are_unique() {
         for (i, a) in CATALOG.iter().enumerate() {
             for b in &CATALOG[i + 1..] {
-                assert_ne!(a.anchor, b.anchor, "duplicate anchor for {:?}/{:?}", a.func, b.func);
+                assert_ne!(
+                    a.anchor, b.anchor,
+                    "duplicate anchor for {:?}/{:?}",
+                    a.func, b.func
+                );
             }
         }
     }

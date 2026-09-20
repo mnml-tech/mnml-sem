@@ -1,226 +1,225 @@
 # Steel Wheels–style semantic model (Pentaho sample / classic BI demo).
 # Aligned with semstrait test_data/steelwheels.yaml grain set: orderfact + dates + customer geography.
-# yaml-language-server: $schema=../../../../OSI/core-spec/osi-schema.json
+# yaml-language-server: $schema=../../../ossie/core-spec/ossie-schema.json
 
-version: "0.1.1"
+version: "0.2.0.dev0"
 
-semantic_model:
-  - name: steelwheels
-    description: >-
-      Steel Wheels sample model — order line facts with time and customer/territory dimensions,
-      suitable for sales and geography analytics (same logical layout as semstrait steelwheels tests).
+name: steelwheels
+description: >-
+  Steel Wheels sample model — order line facts with time and customer/territory dimensions,
+  suitable for sales and geography analytics (same logical layout as semstrait steelwheels tests).
 
-    datasets:
-      - name: orderfact
-        source: steelwheels.orderfact
-        description: Order line fact (quantities, prices, status) with time and customer keys.
-        fields:
-          - name: time_id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: time_id
-            description: Foreign key to dates dimension
-            dimension:
-              is_time: false
-
-          - name: customernumber
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: customernumber
-            description: Foreign key to customer / territory dimension
-            dimension:
-              is_time: false
-
-          - name: quantityordered
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: quantityordered
-            description: Units ordered on the line
-
-          - name: totalprice
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: totalprice
-            description: Extended line amount (list-style revenue for the line)
-
-          - name: priceeach
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: priceeach
-            description: Unit price
-
-          - name: is_premium_order
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: is_premium_order
-            description: Premium order flag
-            dimension:
-              is_time: false
-
-          - name: order_status
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: order_status
-            description: Order status
-            dimension:
-              is_time: false
-
-      - name: dates
-        source: steelwheels.dates
-        primary_key: [time_id]
-        unique_keys:
-          - [time_id]
-        description: Calendar / time dimension (year, quarter, month).
-        fields:
-          - name: time_id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: time_id
-            description: Time surrogate key
-            dimension:
-              is_time: false
-
-          - name: date
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: time_id
-            description: Date id / label (sample schema)
-            dimension:
-              is_time: true
-
-          - name: year_id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: year_id
-            description: Calendar year
-            dimension:
-              is_time: true
-
-          - name: qtr_id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: qtr_id
-            description: Quarter number
-            dimension:
-              is_time: true
-
-          - name: month_name
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: month_name
-            description: Month name
-            dimension:
-              is_time: true
-
-      - name: customer_w_ter
-        source: steelwheels.customer_w_ter
-        primary_key: [customernumber]
-        unique_keys:
-          - [customernumber]
-        description: Customer with sales territory hierarchy (region to city).
-        fields:
-          - name: customernumber
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: customernumber
-            description: Customer business key
-            dimension:
-              is_time: false
-
-          - name: territory
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: territory
-            description: Sales region (e.g. EMEA, APAC, NA)
-            dimension:
-              is_time: false
-
-          - name: country
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: country
-            description: Country
-            dimension:
-              is_time: false
-
-          - name: state
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: state
-            description: State or province
-            dimension:
-              is_time: false
-
-          - name: city
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: city
-            description: City
-            dimension:
-              is_time: false
-
-    relationships:
-      - name: orderfact_to_dates
-        from: orderfact
-        to: dates
-        from_columns: [time_id]
-        to_columns: [time_id]
-
-      - name: orderfact_to_customer
-        from: orderfact
-        to: customer_w_ter
-        from_columns: [customernumber]
-        to_columns: [customernumber]
-
-    metrics:
-      - name: sales
+datasets:
+  - name: orderfact
+    source: steelwheels.orderfact
+    description: Order line fact (quantities, prices, status) with time and customer keys.
+    fields:
+      - name: time_id
         expression:
           dialects:
             - dialect: ANSI_SQL
-              expression: SUM(orderfact.totalprice)
-        description: Total sales (sum of line extended price)
+              expression: time_id
+        description: Foreign key to dates dimension
+        dimension:
+          is_time: false
 
-      - name: quantity
+      - name: customernumber
         expression:
           dialects:
             - dialect: ANSI_SQL
-              expression: SUM(orderfact.quantityordered)
-        description: Total units ordered
+              expression: customernumber
+        description: Foreign key to customer / territory dimension
+        dimension:
+          is_time: false
 
-      - name: revenue
+      - name: quantityordered
         expression:
           dialects:
             - dialect: ANSI_SQL
-              expression: SUM(orderfact.quantityordered * orderfact.priceeach)
-        description: Revenue as quantity × unit price
+              expression: quantityordered
+        description: Units ordered on the line
 
-      - name: premium_sales
+      - name: totalprice
         expression:
           dialects:
             - dialect: ANSI_SQL
-              expression: SUM(CASE WHEN orderfact.priceeach > 100 THEN orderfact.totalprice ELSE 0 END)
-        description: Sales on premium-priced lines (unit price over 100)
+              expression: totalprice
+        description: Extended line amount (list-style revenue for the line)
 
-      - name: avg_unit_price
+      - name: priceeach
         expression:
           dialects:
             - dialect: ANSI_SQL
-              expression: SUM(orderfact.totalprice) / NULLIF(SUM(orderfact.quantityordered), 0)
-        description: Average unit price (sales / quantity)
+              expression: priceeach
+        description: Unit price
+
+      - name: is_premium_order
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: is_premium_order
+        description: Premium order flag
+        dimension:
+          is_time: false
+
+      - name: order_status
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: order_status
+        description: Order status
+        dimension:
+          is_time: false
+
+  - name: dates
+    source: steelwheels.dates
+    primary_key: [time_id]
+    unique_keys:
+      - [time_id]
+    description: Calendar / time dimension (year, quarter, month).
+    fields:
+      - name: time_id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: time_id
+        description: Time surrogate key
+        dimension:
+          is_time: false
+
+      - name: date
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: time_id
+        description: Date id / label (sample schema)
+        dimension:
+          is_time: true
+
+      - name: year_id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: year_id
+        description: Calendar year
+        dimension:
+          is_time: true
+
+      - name: qtr_id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: qtr_id
+        description: Quarter number
+        dimension:
+          is_time: true
+
+      - name: month_name
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: month_name
+        description: Month name
+        dimension:
+          is_time: true
+
+  - name: customer_w_ter
+    source: steelwheels.customer_w_ter
+    primary_key: [customernumber]
+    unique_keys:
+      - [customernumber]
+    description: Customer with sales territory hierarchy (region to city).
+    fields:
+      - name: customernumber
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: customernumber
+        description: Customer business key
+        dimension:
+          is_time: false
+
+      - name: territory
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: territory
+        description: Sales region (e.g. EMEA, APAC, NA)
+        dimension:
+          is_time: false
+
+      - name: country
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: country
+        description: Country
+        dimension:
+          is_time: false
+
+      - name: state
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: state
+        description: State or province
+        dimension:
+          is_time: false
+
+      - name: city
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: city
+        description: City
+        dimension:
+          is_time: false
+
+relationships:
+  - name: orderfact_to_dates
+    from: orderfact
+    to: dates
+    from_columns: [time_id]
+    to_columns: [time_id]
+
+  - name: orderfact_to_customer
+    from: orderfact
+    to: customer_w_ter
+    from_columns: [customernumber]
+    to_columns: [customernumber]
+
+metrics:
+  - name: sales
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orderfact.totalprice)
+    description: Total sales (sum of line extended price)
+
+  - name: quantity
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orderfact.quantityordered)
+    description: Total units ordered
+
+  - name: revenue
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orderfact.quantityordered * orderfact.priceeach)
+    description: Revenue as quantity × unit price
+
+  - name: premium_sales
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(CASE WHEN orderfact.priceeach > 100 THEN orderfact.totalprice ELSE 0 END)
+    description: Sales on premium-priced lines (unit price over 100)
+
+  - name: avg_unit_price
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orderfact.totalprice) / NULLIF(SUM(orderfact.quantityordered), 0)
+    description: Average unit price (sales / quantity)

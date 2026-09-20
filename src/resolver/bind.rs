@@ -1,26 +1,27 @@
-//! Bind a [`SemanticQuery`](crate::query::SemanticQuery) to a concrete OSI semantic model named `model_name` in `doc`.
+//! Bind a [`SemanticQuery`](crate::query::SemanticQuery) against a [`CompiledModel`].
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{Dataset, Field, Metric, OsiDocument, Relationship, SemanticModel};
+use crate::compiled::{CompiledDataset, CompiledField, CompiledMetric, CompiledModel};
+use crate::model::Relationship;
 use crate::plan::JoinKey;
-use crate::query::SemanticQuery;
+use crate::query::{FilterOperator, SemanticQuery};
 use crate::resolver::QueryError;
 
-/// Field resolved with its logical [`Dataset`].
+/// A compiled field together with the dataset it belongs to.
 #[derive(Debug, Clone)]
 pub struct ResolvedField {
     pub dataset: String,
-    pub field: Field,
+    pub field: CompiledField,
 }
 
 /// Filter with a [`ResolvedField`].
 #[derive(Debug, Clone)]
 pub struct BoundFilter {
     pub field: ResolvedField,
-    pub operator: String,
+    pub operator: FilterOperator,
     pub value: serde_json::Value,
-    /// Set when `operator` is `eq_field` / `eq_column`: RHS field (`value` is JSON string `dataset.field`).
+    /// Set when `operator` is [`FilterOperator::EqField`]: the RHS field.
     pub rhs_field: Option<ResolvedField>,
 }
 
@@ -44,39 +45,19 @@ pub struct BoundQuery {
     /// Ordered INNER JOINs after the root scan.
     pub joins: Vec<BoundJoin>,
     pub group_by: Vec<ResolvedField>,
-    pub metrics: Vec<Metric>,
+    pub metrics: Vec<CompiledMetric>,
     pub filters: Vec<BoundFilter>,
 }
 
-/// Resolve `spec` against the semantic model named `model_name` in `doc`.
-pub fn bind_query(
-    doc: &OsiDocument,
-    model_name: &str,
-    spec: &SemanticQuery,
-) -> Result<BoundQuery, QueryError> {
-    if model_name.is_empty() {
-        return Err(QueryError::ModelNotFound(String::new()));
-    }
-
-    let model = doc
-        .semantic_model
-        .iter()
-        .find(|m| m.name == model_name)
-        .ok_or_else(|| QueryError::ModelNotFound(model_name.to_string()))?;
-
+/// Resolve `spec` against `model`.
+pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQuery, QueryError> {
     let mut paths: Vec<String> = Vec::new();
     paths.extend(spec.group_by.iter().cloned());
     paths.extend(spec.filters.iter().map(|f| f.field.clone()));
     paths.extend(spec.filters.iter().filter_map(|f| {
-        if matches!(
-            f.operator.as_deref(),
-            Some("eq_field" | "eq_column")
-        ) && f.value.as_str().is_some()
-        {
-            f.value.as_str().map(str::to_string)
-        } else {
-            None
-        }
+        (f.operator() == FilterOperator::EqField)
+            .then(|| f.value.as_str().map(str::to_string))
+            .flatten()
     }));
 
     let path_datasets: HashSet<String> = paths
@@ -93,19 +74,42 @@ pub fn bind_query(
         }
         spec.dataset.clone().ok_or(QueryError::MissingBaseDataset)?
     } else if path_datasets.len() == 1 {
-        spec.dataset.clone().unwrap_or_else(|| path_datasets.iter().next().unwrap().clone())
+        spec.dataset
+            .clone()
+            .unwrap_or_else(|| path_datasets.iter().next().unwrap().clone())
     } else {
         spec.dataset.clone().ok_or(QueryError::MissingRootDataset)?
     };
 
+    let metrics: Vec<CompiledMetric> = spec
+        .metrics
+        .iter()
+        .map(|name| {
+            model.metric(name).cloned().ok_or_else(|| {
+                // A metric that failed to compile is absent here; say why
+                // rather than claiming it does not exist.
+                match model.issue_for(&format!("metric {name:?}")) {
+                    Some(issue) => QueryError::NotCompiled {
+                        target: issue.target.clone(),
+                        reason: issue.message.clone(),
+                    },
+                    None => QueryError::MetricNotFound(name.clone()),
+                }
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
     let mut required: HashSet<String> = path_datasets;
     required.insert(root.clone());
+    // Ossie metrics may span datasets, so a metric's own expression decides
+    // which joins the query needs even when nothing is grouped or filtered on
+    // the far side. Compilation already worked this out.
+    for m in &metrics {
+        required.extend(m.datasets.iter().cloned());
+    }
 
-    let dataset_by_name: HashMap<String, &Dataset> = model
-        .datasets
-        .iter()
-        .map(|d| (d.name.clone(), d))
-        .collect();
+    let dataset_by_name: HashMap<String, &CompiledDataset> =
+        model.datasets.iter().map(|d| (d.name.clone(), d)).collect();
 
     for name in &required {
         if !dataset_by_name.contains_key(name) {
@@ -122,12 +126,15 @@ pub fn bind_query(
             .get(ds_name)
             .cloned()
             .ok_or_else(|| QueryError::DatasetNotFound(ds_name.to_string()))?;
-        let field = dataset
-            .fields
-            .iter()
-            .find(|f| f.name == field_name)
-            .cloned()
-            .ok_or_else(|| QueryError::FieldNotFound(format!("{ds_name}.{field_name}")))?;
+        let field = dataset.field(field_name).cloned().ok_or_else(|| {
+            match model.issue_for(&format!("field {ds_name:?}.{field_name:?}")) {
+                Some(issue) => QueryError::NotCompiled {
+                    target: issue.target.clone(),
+                    reason: issue.message.clone(),
+                },
+                None => QueryError::FieldNotFound(format!("{ds_name}.{field_name}")),
+            }
+        })?;
         Ok(ResolvedField {
             dataset: ds_name.to_string(),
             field,
@@ -143,18 +150,11 @@ pub fn bind_query(
     let mut filters = Vec::new();
     for f in &spec.filters {
         let field = resolve_field(&f.field)?;
-        let operator = f.operator.clone().unwrap_or_else(|| {
-            if f.value.is_array() {
-                "in".to_string()
-            } else {
-                "eq".to_string()
-            }
-        });
-        let rhs_field = if matches!(operator.as_str(), "eq_field" | "eq_column") {
-            let path = f.value.as_str().ok_or_else(|| {
-                QueryError::InvalidFieldRef(
-                    "eq_field / eq_column filter requires string value `dataset.field`".to_string(),
-                )
+        let operator = f.operator();
+        let rhs_field = if operator == FilterOperator::EqField {
+            let path = f.value.as_str().ok_or_else(|| QueryError::InvalidFilter {
+                field: f.field.clone(),
+                reason: "eq_field requires a string value naming `dataset.field`".to_string(),
             })?;
             Some(resolve_field(path)?)
         } else {
@@ -167,19 +167,6 @@ pub fn bind_query(
             rhs_field,
         });
     }
-
-    let metrics: Vec<Metric> = spec
-        .metrics
-        .iter()
-        .map(|name| {
-            model
-                .metrics
-                .iter()
-                .find(|m| m.name == *name)
-                .cloned()
-                .ok_or_else(|| QueryError::MetricNotFound(name.clone()))
-        })
-        .collect::<Result<_, _>>()?;
 
     let joins = if required.len() <= 1 {
         Vec::new()
@@ -223,9 +210,9 @@ fn join_keys(left: &str, right: &str, rel: &Relationship) -> Option<Vec<JoinKey>
                 .zip(rel.to_columns.iter())
                 .map(|(a, b)| JoinKey {
                     left_dataset: left.to_string(),
-                    left_sql: a.clone(),
+                    left_column: a.clone(),
                     right_dataset: right.to_string(),
-                    right_sql: b.clone(),
+                    right_column: b.clone(),
                 })
                 .collect(),
         );
@@ -240,9 +227,9 @@ fn join_keys(left: &str, right: &str, rel: &Relationship) -> Option<Vec<JoinKey>
                 .zip(rel.to_columns.iter())
                 .map(|(a, b)| JoinKey {
                     left_dataset: left.to_string(),
-                    left_sql: b.clone(),
+                    left_column: b.clone(),
                     right_dataset: right.to_string(),
-                    right_sql: a.clone(),
+                    right_column: a.clone(),
                 })
                 .collect(),
         );
@@ -252,7 +239,7 @@ fn join_keys(left: &str, right: &str, rel: &Relationship) -> Option<Vec<JoinKey>
 
 /// Prim-style: grow from `root` until `required` is covered.
 fn build_join_order(
-    model: &SemanticModel,
+    model: &CompiledModel,
     required: &HashSet<String>,
     root: &str,
 ) -> Result<Vec<BoundJoin>, QueryError> {
@@ -295,10 +282,7 @@ fn build_join_order(
         }
         let (left, right, join) = step.ok_or_else(|| {
             QueryError::DisconnectedDatasets(
-                required
-                    .difference(&included)
-                    .cloned()
-                    .collect::<Vec<_>>(),
+                required.difference(&included).cloned().collect::<Vec<_>>(),
             )
         })?;
         included.insert(right.clone());

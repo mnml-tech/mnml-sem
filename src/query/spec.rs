@@ -22,18 +22,51 @@ pub struct SemanticQuery {
     pub dataset: Option<String>,
 }
 
-/// Predicate on a field (`dataset.field`).
+/// Comparison used by a [`FilterSpec`].
 ///
-/// For **column-to-column** equality, set `operator` to `"eq_field"` (or `"eq_column"`) and
-/// `value` to a JSON string holding the RHS reference, e.g. `"orders.ship_date"`.
+/// Deserialized from the query JSON, so an unrecognized spelling fails there
+/// rather than silently degrading to equality. Symbol aliases are accepted for
+/// the operators that have a conventional one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOperator {
+    #[serde(alias = "=")]
+    Eq,
+    #[serde(alias = "!=", alias = "<>")]
+    Ne,
+    #[serde(alias = "<")]
+    Lt,
+    #[serde(alias = "<=")]
+    Lte,
+    #[serde(alias = ">")]
+    Gt,
+    #[serde(alias = ">=")]
+    Gte,
+    /// `value` must be a JSON array of literals.
+    In,
+    /// `value` must be a JSON array of literals.
+    NotIn,
+    /// `value` is ignored.
+    IsNull,
+    /// `value` is ignored.
+    IsNotNull,
+    /// Column-to-column equality; `value` is a `dataset.field` reference string.
+    #[serde(alias = "eq_column")]
+    EqField,
+}
+
+/// Predicate on a field (`dataset.field`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilterSpec {
     /// `dataset.field`
     pub field: String,
-    /// Defaults: `in` if `value` is a JSON array, otherwise `eq`.
+    /// Omitted means [`FilterOperator::In`] when `value` is a JSON array and
+    /// [`FilterOperator::Eq`] otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<FilterOperator>,
+    /// Omitted is `null`, which is what the null-checking operators expect.
     #[serde(default)]
-    pub operator: Option<String>,
     pub value: serde_json::Value,
 }
 
@@ -45,5 +78,15 @@ impl FilterSpec {
             operator: None,
             value,
         }
+    }
+
+    /// The operator to apply, resolving the shape-based default.
+    #[must_use]
+    pub fn operator(&self) -> FilterOperator {
+        self.operator.unwrap_or(if self.value.is_array() {
+            FilterOperator::In
+        } else {
+            FilterOperator::Eq
+        })
     }
 }

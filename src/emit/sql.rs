@@ -127,7 +127,7 @@ fn collect_filters(
 
 fn from_join_or_scan(plan: &LogicalPlan, ctx: SqlCtx) -> Result<String, EmitError> {
     match plan {
-        LogicalPlan::Scan { source, .. } => Ok(ctx.dialect.quote_table(source)),
+        LogicalPlan::Scan { source, .. } => Ok(ctx.dialect.quote_source(source)),
         LogicalPlan::Join { left, right, on } => {
             let l = from_join_or_scan(left.as_ref(), ctx)?;
             let r = from_join_or_scan(right.as_ref(), ctx)?;
@@ -146,8 +146,9 @@ fn from_join_or_scan(plan: &LogicalPlan, ctx: SqlCtx) -> Result<String, EmitErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::expr::{AggFunc, Expr, Literal};
-    use crate::plan::LogicalPlan;
+    use crate::catalog::Func;
+    use crate::plan::expr::{Expr, Literal};
+    use crate::plan::{LogicalPlan, ScanColumn};
     use crate::sql_dialect::BigQuery;
 
     fn minimal_aggregate() -> LogicalPlan {
@@ -156,20 +157,21 @@ mod tests {
                 input: Box::new(LogicalPlan::Scan {
                     source: "warehouse.public.fact_table".into(),
                     dataset: "fact".into(),
-                    columns: vec!["id".into()],
+                    columns: vec![ScanColumn::new("id", None)],
                 }),
-                predicate: Expr::Eq(
-                    Box::new(Expr::column("", "id")),
-                    Box::new(Expr::Literal(Literal::Int64(1))),
+                predicate: Expr::binary(
+                    Func::Equal,
+                    Expr::column("", "id"),
+                    Expr::Literal(Literal::Int64(1)),
                 ),
             }),
             group_by: vec![Expr::column("", "id")],
             aggregates: vec![crate::plan::NamedAggregate {
                 name: "row_count".into(),
                 expr: Expr::Agg {
-                    func: AggFunc::Count,
+                    func: Func::Count,
                     distinct: false,
-                    arg: None,
+                    args: vec![],
                 },
             }],
         }
@@ -179,7 +181,7 @@ mod tests {
     fn aggregate_filter_scan_sql() {
         let sql = to_sql(&minimal_aggregate()).expect("sql");
         assert!(sql.starts_with("SELECT "));
-        assert!(sql.contains("FROM \"warehouse.public.fact_table\""));
+        assert!(sql.contains("FROM warehouse.public.fact_table"), "{sql}");
         assert!(sql.contains("WHERE id = 1"));
         assert!(sql.contains("GROUP BY id"));
         assert!(sql.contains("COUNT(*) AS row_count"));
@@ -189,10 +191,10 @@ mod tests {
     fn bigquery_uses_backtick_table_quoting() {
         let sql = to_sql_with(&minimal_aggregate(), &BigQuery).expect("sql");
         assert!(sql.contains("FROM `warehouse.public.fact_table`"), "{sql}");
-        // ANSI rendering is unchanged.
+        // ANSI treats the same source as a qualified name, part by part.
         assert!(to_sql(&minimal_aggregate())
             .unwrap()
-            .contains("FROM \"warehouse.public.fact_table\""));
+            .contains("FROM warehouse.public.fact_table"));
     }
 
     #[test]
@@ -201,15 +203,15 @@ mod tests {
             input: Box::new(LogicalPlan::Scan {
                 source: "ds.t".into(),
                 dataset: "t".into(),
-                columns: vec!["d".into()],
+                columns: vec![ScanColumn::new("d", None)],
             }),
             group_by: vec![],
             aggregates: vec![crate::plan::NamedAggregate {
                 name: "today".into(),
                 expr: Expr::Agg {
-                    func: AggFunc::Max,
+                    func: Func::Max,
                     distinct: false,
-                    arg: Some(Box::new(Expr::CurrentDate)),
+                    args: vec![Expr::call(Func::CurrentDate, vec![])],
                 },
             }],
         };

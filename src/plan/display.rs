@@ -90,7 +90,8 @@ fn format_aggregates(aggregates: &[NamedAggregate], qualify: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::plan::expr::{AggFunc, Expr};
+    use crate::catalog::Func;
+    use crate::plan::expr::Expr;
     use crate::plan::{LogicalPlan, NamedAggregate};
 
     #[test]
@@ -100,20 +101,21 @@ mod tests {
                 input: Box::new(LogicalPlan::Scan {
                     source: "warehouse.public.f".into(),
                     dataset: "fact".into(),
-                    columns: vec!["id".into()],
+                    columns: vec![crate::plan::ScanColumn::new("id", None)],
                 }),
-                predicate: Expr::Eq(
-                    Box::new(Expr::column("", "id")),
-                    Box::new(Expr::Literal(super::super::expr::Literal::Int64(1))),
+                predicate: Expr::binary(
+                    Func::Equal,
+                    Expr::column("", "id"),
+                    Expr::Literal(super::super::expr::Literal::Int64(1)),
                 ),
             }),
             group_by: vec![Expr::column("", "id")],
             aggregates: vec![NamedAggregate {
                 name: "row_count".into(),
                 expr: Expr::Agg {
-                    func: AggFunc::Count,
+                    func: Func::Count,
                     distinct: false,
-                    arg: None,
+                    args: vec![],
                 },
             }],
         };

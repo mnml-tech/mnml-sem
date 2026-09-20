@@ -11,8 +11,22 @@ pub trait SqlDialect {
     /// Quote a bare identifier (e.g. a column alias).
     fn quote_ident(&self, ident: &str) -> String;
 
-    /// Quote a (possibly dotted) source path used in `FROM` and column qualifiers.
-    fn quote_table(&self, path: &str) -> String;
+    /// Quote a [`Dataset::source`] path for `FROM`.
+    ///
+    /// `source` is a dot-separated qualified name (`database.schema.table`, per
+    /// the core spec), so dialects differ in whether each part is quoted
+    /// separately or the whole path is wrapped once.
+    ///
+    /// [`Dataset::source`]: crate::model::Dataset::source
+    fn quote_source(&self, path: &str) -> String;
+
+    /// Quote a string literal, including whatever escaping the dialect needs.
+    ///
+    /// The ANSI default doubles embedded single quotes. A dialect that also
+    /// treats backslash as an escape character must override this.
+    fn quote_string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
 
     /// Render a catalog function from pre-formatted operand SQL. Defaults to the
     /// catalog's ANSI [`SqlForm`]; override for dialect-specific spellings.
@@ -29,6 +43,8 @@ pub fn render_ansi(func: Func, operands: &[String]) -> String {
         SqlForm::Variadic(op) => operands.join(&format!(" {op} ")),
         SqlForm::Call(name) => format!("{name}({})", operands.join(", ")),
         SqlForm::Keyword(kw) => kw.to_string(),
+        SqlForm::Prefix(op) => format!("{op} {}", operands[0]),
+        SqlForm::Postfix(op) => format!("{} {op}", operands[0]),
     }
 }
 
@@ -55,8 +71,12 @@ impl SqlDialect for Ansi {
         }
     }
 
-    fn quote_table(&self, path: &str) -> String {
-        crate::sql_quote::dotted_osi_name_as_sql_table_expr(path)
+    /// Each part is its own identifier: `a.b.c` becomes `"a"."b"."c"`.
+    fn quote_source(&self, path: &str) -> String {
+        path.split('.')
+            .map(|part| self.quote_ident(part))
+            .collect::<Vec<_>>()
+            .join(".")
     }
 }
 
@@ -73,8 +93,9 @@ impl SqlDialect for BigQuery {
         }
     }
 
-    fn quote_table(&self, path: &str) -> String {
-        // BigQuery quotes the whole `project.dataset.table` path in one pair of backticks.
+    /// BigQuery quotes the whole `project.dataset.table` path in one pair of
+    /// backticks rather than quoting each part.
+    fn quote_source(&self, path: &str) -> String {
         if path.contains('.') {
             delimit(path, '`', "\\`")
         } else {
@@ -82,9 +103,18 @@ impl SqlDialect for BigQuery {
         }
     }
 
+    /// BigQuery string literals also honour backslash escapes, so a trailing
+    /// backslash would otherwise escape the closing quote.
+    fn quote_string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+    }
+
     fn render_func(&self, func: Func, operands: &[String]) -> String {
         match func {
             Func::CurrentDate => "CURRENT_DATE()".to_string(),
+            // BigQuery has no date arithmetic operator; it needs the call form
+            // with an explicit unit.
+            Func::DateDiff => format!("DATE_DIFF({}, {}, DAY)", operands[0], operands[1]),
             _ => render_ansi(func, operands),
         }
     }
@@ -94,16 +124,30 @@ impl SqlDialect for BigQuery {
 mod tests {
     use super::*;
 
+    /// A dotted `source` is a qualified name, so ANSI quotes each part.
     #[test]
-    fn ansi_table_uses_double_quotes_for_dotted() {
-        assert_eq!(Ansi.quote_table("a.b.c"), "\"a.b.c\"");
-        assert_eq!(Ansi.quote_table("plain"), "plain");
+    fn ansi_source_quotes_each_part() {
+        assert_eq!(Ansi.quote_source("a.b.c"), "a.b.c");
+        assert_eq!(Ansi.quote_source("plain"), "plain");
+        assert_eq!(Ansi.quote_source("we ird.tbl"), "\"we ird\".tbl");
     }
 
     #[test]
-    fn bigquery_table_uses_backticks_for_dotted() {
-        assert_eq!(BigQuery.quote_table("a.b.c"), "`a.b.c`");
-        assert_eq!(BigQuery.quote_table("plain"), "plain");
+    fn bigquery_source_wraps_the_whole_path() {
+        assert_eq!(BigQuery.quote_source("a.b.c"), "`a.b.c`");
+        assert_eq!(BigQuery.quote_source("plain"), "plain");
+    }
+
+    #[test]
+    fn ansi_string_literals_double_single_quotes() {
+        assert_eq!(Ansi.quote_string_literal("O'Brien"), "'O''Brien'");
+    }
+
+    /// A trailing backslash must not escape the closing quote in BigQuery.
+    #[test]
+    fn bigquery_string_literals_escape_backslashes() {
+        assert_eq!(BigQuery.quote_string_literal("a\\"), "'a\\\\'");
+        assert_eq!(BigQuery.quote_string_literal("O'Brien"), "'O\\'Brien'");
     }
 
     #[test]
@@ -118,6 +162,17 @@ mod tests {
         assert_eq!(
             BigQuery.render_func(Func::Equal, &operands),
             Ansi.render_func(Func::Equal, &operands)
+        );
+    }
+
+    #[test]
+    fn date_diff_differs_by_dialect() {
+        let ops = vec!["CURRENT_DATE".to_string(), "d".to_string()];
+        assert_eq!(Ansi.render_func(Func::DateDiff, &ops), "(CURRENT_DATE - d)");
+        let ops = vec!["CURRENT_DATE()".to_string(), "d".to_string()];
+        assert_eq!(
+            BigQuery.render_func(Func::DateDiff, &ops),
+            "DATE_DIFF(CURRENT_DATE(), d, DAY)"
         );
     }
 }

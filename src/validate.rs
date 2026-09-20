@@ -1,28 +1,21 @@
 //! Semantic validation beyond Serde (uniqueness, references, schema constraints).
 
 use crate::error::Error;
-use crate::model::{
-    count_mnml_dialects, pick_mnml_dialect, Expression, MnmlDatasetStorage, MnmlExpressionKind,
-    OsiDocument, envelope_from_expression,
-};
+use crate::model::{Expression, OSSIE_SPEC_VERSION, OssieDocument};
 use std::collections::{HashMap, HashSet};
 
-const EXPECTED_VERSION: &str = "0.1.1";
-
-/// Validate an [`OsiDocument`] (version, uniqueness, references, expression shape).
-pub fn validate(doc: &OsiDocument) -> Result<(), Error> {
+/// Validate an [`OssieDocument`] (version, uniqueness, references, expression shape).
+pub fn validate(doc: &OssieDocument) -> Result<(), Error> {
     let mut issues = Vec::new();
 
-    if doc.version != EXPECTED_VERSION {
+    if doc.version != OSSIE_SPEC_VERSION {
         issues.push(format!(
             "[Version] expected {:?}, got {:?}",
-            EXPECTED_VERSION, doc.version
+            OSSIE_SPEC_VERSION, doc.version
         ));
     }
 
-    for model in &doc.semantic_model {
-        validate_semantic_model(model, &mut issues);
-    }
+    validate_semantic_model(&doc.model, &mut issues);
 
     if issues.is_empty() {
         Ok(())
@@ -59,37 +52,12 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
         }
 
         for field in &dataset.fields {
-            validate_expression_or_mnml(
+            validate_expression(
                 &format!("field {:?}.{:?}", dataset.name, field.name),
                 &field.expression,
                 issues,
-                MnmlExpressionKind::FieldExpr,
             );
         }
-
-        let mut mnml_storage: Vec<MnmlDatasetStorage> = Vec::new();
-        for ext in &dataset.custom_extensions {
-            if ext.vendor_name != crate::model::Vendor::Mnml {
-                continue;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&ext.data) else {
-                issues.push(format!(
-                    "[MNML] dataset {:?} (model {:?}) has invalid MNML extension JSON",
-                    dataset.name, model_name
-                ));
-                continue;
-            };
-            if v.get("format").is_some() {
-                match serde_json::from_value::<MnmlDatasetStorage>(v) {
-                    Ok(storage) => mnml_storage.push(storage),
-                    Err(e) => issues.push(format!(
-                        "[MNML] dataset {:?} (model {:?}) invalid storage payload: {e}",
-                        dataset.name, model_name
-                    )),
-                }
-            }
-        }
-        validate_mnml_dataset_storage(model_name, &dataset.name, &mnml_storage, issues);
     }
 
     let metric_names: Vec<&str> = model.metrics.iter().map(|m| m.name.as_str()).collect();
@@ -101,11 +69,10 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
     }
 
     for metric in &model.metrics {
-        validate_expression_or_mnml(
+        validate_expression(
             &format!("metric {:?}", metric.name),
             &metric.expression,
             issues,
-            MnmlExpressionKind::Metric,
         );
     }
 
@@ -147,117 +114,16 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
     }
 }
 
-fn validate_expression_nonempty(context: &str, expr: &Expression, issues: &mut Vec<String>) {
+/// Every expression needs at least one dialect entry (schema `minItems: 1`).
+///
+/// Whether the text *compiles* is not checked here: that needs the query
+/// context (which dataset an identifier belongs to) and is reported by the
+/// planner, where the error can name the query that hit it.
+fn validate_expression(context: &str, expr: &Expression, issues: &mut Vec<String>) {
     if expr.dialects.is_empty() {
         issues.push(format!(
-            "[Expression] {} must have at least one dialect entry",
-            context
+            "[Expression] {context} must have at least one dialect entry"
         ));
-    }
-}
-
-/// Require a valid MNML dialect entry **or** at least one OSI dialect entry.
-fn validate_expression_or_mnml(
-    context: &str,
-    expr: &Expression,
-    issues: &mut Vec<String>,
-    kind: MnmlExpressionKind,
-) {
-    let dialect_count = count_mnml_dialects(expr);
-    if dialect_count > 1 {
-        issues.push(format!(
-            "[MNML] {context} has multiple MNML dialect entries; expected at most one"
-        ));
-    }
-
-    if let Some(body) = pick_mnml_dialect(expr) {
-        if body.as_object().is_none() {
-            issues.push(format!(
-                "[MNML] {context} MNML dialect body must be a mapping"
-            ));
-        }
-        if let Err(e) = envelope_from_expression(expr, kind) {
-            issues.push(format!("[MNML] {context} invalid MNML dialect: {e}"));
-        }
-        return;
-    }
-
-    validate_expression_nonempty(context, expr, issues);
-}
-
-fn validate_mnml_dataset_storage(
-    model_name: &str,
-    dataset_name: &str,
-    mnml_exts: &[MnmlDatasetStorage],
-    issues: &mut Vec<String>,
-) {
-    if mnml_exts.len() > 1 {
-        issues.push(format!(
-            "[MNML] dataset {:?} (model {:?}) has multiple MNML storage extensions; expected at most one",
-            dataset_name, model_name
-        ));
-    }
-
-    for ext in mnml_exts {
-        if ext.version != 1 {
-            issues.push(format!(
-                "[MNML] dataset {:?} (model {:?}) has unsupported MNML storage version {}; expected 1",
-                dataset_name, model_name, ext.version
-            ));
-        }
-
-        let location = ext.location.trim();
-        if location.is_empty() {
-            issues.push(format!(
-                "[MNML] dataset {:?} (model {:?}) has empty MNML storage location",
-                dataset_name, model_name
-            ));
-        } else {
-            if location.starts_with('/') {
-                issues.push(format!(
-                    "[MNML] dataset {:?} (model {:?}) location {:?} must be relative (no leading '/')",
-                    dataset_name, model_name, ext.location
-                ));
-            }
-            if location.contains("://") {
-                issues.push(format!(
-                    "[MNML] dataset {:?} (model {:?}) location {:?} must be relative (URI schemes are not allowed)",
-                    dataset_name, model_name, ext.location
-                ));
-            }
-            if location.split('/').any(|segment| segment == "..") {
-                issues.push(format!(
-                    "[MNML] dataset {:?} (model {:?}) location {:?} must not contain '..'",
-                    dataset_name, model_name, ext.location
-                ));
-            }
-        }
-
-        if let Some(partitioning) = &ext.partitioning {
-            if partitioning.keys.is_empty() {
-                issues.push(format!(
-                    "[MNML] dataset {:?} (model {:?}) partitioning.keys must not be empty",
-                    dataset_name, model_name
-                ));
-            }
-
-            let key_names: Vec<&str> = partitioning.keys.iter().map(String::as_str).collect();
-            for dup in duplicate_strings(&key_names) {
-                issues.push(format!(
-                    "[MNML] dataset {:?} (model {:?}) partitioning.keys has duplicate key {:?}",
-                    dataset_name, model_name, dup
-                ));
-            }
-            for key in &partitioning.keys {
-                if key.trim().is_empty() {
-                    issues.push(format!(
-                        "[MNML] dataset {:?} (model {:?}) partitioning.keys must not contain empty values",
-                        dataset_name, model_name
-                    ));
-                    break;
-                }
-            }
-        }
     }
 }
 
@@ -279,105 +145,111 @@ mod tests {
     use super::validate;
     use crate::parser::from_yaml_str;
 
-    #[test]
-    fn validate_allows_valid_mnml_storage_extension() {
-        let yaml = r#"
-version: "0.1.1"
-semantic_model:
-  - name: m
-    datasets:
-      - name: people
-        source: warehouse.public.people
-        custom_extensions:
-          - vendor_name: MNML
-            data: >-
-              {"version":1,"format":"parquet","location":"people_daily/","partitioning":{"style":"hive","keys":["dt"]}}
-        fields:
-          - name: id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: id
+    const VALID: &str = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: people
+    source: warehouse.public.people
+    fields:
+      - name: id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: id
 "#;
-        let doc = from_yaml_str(yaml).expect("parse");
+
+    #[test]
+    fn validate_accepts_a_minimal_document() {
+        let doc = from_yaml_str(VALID).expect("parse");
         validate(&doc).expect("validate");
     }
 
+    /// Vendor extensions are carried, never interpreted.
     #[test]
-    fn validate_rejects_duplicate_mnml_storage_extensions() {
+    fn validate_ignores_vendor_extension_payloads() {
         let yaml = r#"
-version: "0.1.1"
-semantic_model:
-  - name: m
-    datasets:
-      - name: people
-        source: warehouse.public.people
-        custom_extensions:
-          - vendor_name: MNML
-            data: '{"version":1,"format":"parquet","location":"a/"}'
-          - vendor_name: MNML
-            data: '{"version":1,"format":"parquet","location":"b/"}'
-        fields:
-          - name: id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: id
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: people
+    source: warehouse.public.people
+    custom_extensions:
+      - vendor_name: ACME
+        data: 'not json at all'
+    fields:
+      - name: id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: id
 "#;
         let doc = from_yaml_str(yaml).expect("parse");
-        let err = validate(&doc).expect_err("must fail");
-        let msg = err.to_string();
-        assert!(msg.contains("multiple MNML storage extensions"), "{msg}");
+        validate(&doc).expect("an opaque vendor payload must not fail validation");
     }
 
     #[test]
-    fn validate_rejects_absolute_or_parent_location() {
-        let yaml = r#"
-version: "0.1.1"
-semantic_model:
-  - name: m
-    datasets:
-      - name: people
-        source: warehouse.public.people
-        custom_extensions:
-          - vendor_name: MNML
-            data: '{"version":1,"format":"parquet","location":"file:///tmp/people/../x"}'
-        fields:
-          - name: id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: id
-"#;
-        let doc = from_yaml_str(yaml).expect("parse");
+    fn validate_rejects_a_wrong_version() {
+        let doc = from_yaml_str(&VALID.replace("0.2.0.dev0", "0.1.1")).expect("parse");
         let err = validate(&doc).expect_err("must fail");
-        let msg = err.to_string();
-        assert!(msg.contains("must be relative"), "{msg}");
-        assert!(msg.contains("must not contain '..'"), "{msg}");
+        assert!(err.to_string().contains("[Version]"), "{err}");
     }
 
     #[test]
-    fn validate_rejects_invalid_mnml_payload_json() {
+    fn validate_rejects_duplicate_dataset_names() {
         let yaml = r#"
-version: "0.1.1"
-semantic_model:
-  - name: m
-    datasets:
-      - name: people
-        source: warehouse.public.people
-        custom_extensions:
-          - vendor_name: MNML
-            data: '{"version":1,"format":"parquet",'
-        fields:
-          - name: id
-            expression:
-              dialects:
-                - dialect: ANSI_SQL
-                  expression: id
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: d
+    source: a
+  - name: d
+    source: b
 "#;
         let doc = from_yaml_str(yaml).expect("parse");
         let err = validate(&doc).expect_err("must fail");
-        let msg = err.to_string();
-        assert!(msg.contains("invalid MNML extension JSON"), "{msg}");
+        assert!(err.to_string().contains("duplicate dataset name"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_relationship_datasets() {
+        let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: d
+    source: a
+relationships:
+  - name: r
+    from: d
+    to: nope
+    from_columns: [x]
+    to_columns: [y]
+"#;
+        let doc = from_yaml_str(yaml).expect("parse");
+        let err = validate(&doc).expect_err("must fail");
+        assert!(err.to_string().contains("unknown dataset"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_mismatched_relationship_columns() {
+        let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: a
+    source: a
+  - name: b
+    source: b
+relationships:
+  - name: r
+    from: a
+    to: b
+    from_columns: [x, y]
+    to_columns: [z]
+"#;
+        let doc = from_yaml_str(yaml).expect("parse");
+        let err = validate(&doc).expect_err("must fail");
+        assert!(err.to_string().contains("does not match"), "{err}");
     }
 }

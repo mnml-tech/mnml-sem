@@ -1,4 +1,4 @@
-//! Errors from resolving a [`SemanticQuery`](crate::query::SemanticQuery) against an OSI document.
+//! Errors from resolving a [`SemanticQuery`](crate::query::SemanticQuery) against an Ossie document.
 
 /// Resolution failed (unknown model, bad references, inconsistent base dataset, etc.).
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,18 @@ pub enum QueryError {
     #[error("expression has no dialect entries usable for planning")]
     MissingExpressionSql,
 
-    #[error("invalid MNML expression: {0}")]
-    InvalidMnmlExpression(String),
+    #[error("invalid expression: {0}")]
+    InvalidExpression(String),
+
+    /// The model compiled, but this field or metric did not.
+    #[error("{target} could not be compiled: {reason}")]
+    NotCompiled { target: String, reason: String },
+
+    #[error("invalid filter on {field:?}: {reason}")]
+    InvalidFilter { field: String, reason: String },
+
+    /// Parsed as SQL, but outside the Ossie expression profile (or not yet
+    /// implemented here) — e.g. a subquery or a window function.
+    #[error("unsupported expression: {0}")]
+    UnsupportedExpression(String),
 }

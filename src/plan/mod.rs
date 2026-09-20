@@ -1,14 +1,14 @@
-//! Logical plan AST (nouns) for OSI-backed queries.
+//! Logical plan AST (nouns) for Ossie-backed queries.
 
 mod display;
 pub mod expr;
-pub mod mnml;
+pub mod ossie_sql;
 mod sql_format;
 
-use crate::model::{Dialect, Expression};
+use crate::model::{DataType, Dialect, Expression};
 
 pub use display::DisplayIndent;
-pub use expr::{AggFunc, ColumnRef, Expr, JoinKey, Literal, parse_column_sql, parse_metric_sql};
+pub use expr::{ColumnRef, Expr, JoinKey, Literal};
 pub use sql_format::{format_column, format_expr, format_join_on, SqlCtx};
 
 /// Root logical plan node (scan / join → optional filter → aggregate).
@@ -19,8 +19,8 @@ pub enum LogicalPlan {
         source: String,
         /// Logical dataset name (schema context alias).
         dataset: String,
-        /// Physical column names exposed by this scan (from OSI field expressions).
-        columns: Vec<String>,
+        /// Columns this scan exposes, in order.
+        columns: Vec<ScanColumn>,
     },
     Join {
         left: Box<LogicalPlan>,
@@ -39,6 +39,26 @@ pub enum LogicalPlan {
     },
 }
 
+/// A column exposed by a [`LogicalPlan::Scan`].
+///
+/// `datatype` is whatever the model declared. It is `None` when the field omits
+/// `datatype`, which the core spec permits — consumers that need a concrete
+/// type must resolve it themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanColumn {
+    pub name: String,
+    pub datatype: Option<DataType>,
+}
+
+impl ScanColumn {
+    pub fn new(name: impl Into<String>, datatype: Option<DataType>) -> Self {
+        Self {
+            name: name.into(),
+            datatype,
+        }
+    }
+}
+
 /// Aggregate with output label (metric name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamedAggregate {
@@ -48,9 +68,25 @@ pub struct NamedAggregate {
 
 /// Prefer `ANSI_SQL`, else first dialect entry.
 pub fn pick_expression_sql(expr: &Expression) -> Option<String> {
-    expr.dialects
+    pick_expression_dialect(expr).map(|(_, sql)| sql)
+}
+
+/// The dialect entry to compile, with its text.
+///
+/// Prefers `ANSI_SQL`, then any other dialect this crate can parse as SQL, then
+/// the first entry — so a model carrying only `SNOWFLAKE` still compiles, and a
+/// non-SQL dialect surfaces as a clear error rather than being silently picked
+/// over a usable one.
+pub fn pick_expression_dialect(expr: &Expression) -> Option<(Dialect, String)> {
+    let pick = expr
+        .dialects
         .iter()
         .find(|d| d.dialect == Dialect::AnsiSql)
-        .or_else(|| expr.dialects.first())
-        .and_then(|d| d.sql_expression().map(|s| s.to_string()))
+        .or_else(|| {
+            expr.dialects
+                .iter()
+                .find(|d| d.sql_expression().is_some() && ossie_sql::is_sql_dialect(d.dialect))
+        })
+        .or_else(|| expr.dialects.first())?;
+    pick.sql_expression().map(|s| (pick.dialect, s.to_string()))
 }

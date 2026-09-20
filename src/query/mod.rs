@@ -2,4 +2,4 @@
 
 mod spec;
 
-pub use spec::{FilterSpec, SemanticQuery};
+pub use spec::{FilterOperator, FilterSpec, SemanticQuery};

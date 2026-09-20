@@ -1,4 +1,4 @@
-//! Resolve a [`SemanticQuery`](crate::query::SemanticQuery) to concrete OSI definitions (verb).
+//! Resolve a [`SemanticQuery`](crate::query::SemanticQuery) to concrete Ossie definitions (verb).
 
 mod bind;
 mod error;

@@ -1,30 +1,29 @@
 //! Emit Substrait [`Plan`](substrait::proto::Plan) from a structured [`LogicalPlan`](crate::plan::LogicalPlan).
 
 use substrait::proto::{
-    self,
+    self, AggregationPhase,
     aggregate_function::AggregationInvocation,
     aggregate_rel::{Grouping, Measure},
     expression::{
-        self,
+        self, ReferenceSegment,
         literal::LiteralType,
         reference_segment::{ReferenceType, StructField},
-        ReferenceSegment,
     },
     extensions::{
-        simple_extension_declaration::MappingType, SimpleExtensionDeclaration, SimpleExtensionUrn,
+        SimpleExtensionDeclaration, SimpleExtensionUrn, simple_extension_declaration::MappingType,
     },
     function_argument::ArgType,
     plan_rel::RelType as PlanRelType,
-    r#type::{Kind, Nullability},
     read_rel::{NamedTable, ReadType},
     rel::RelType,
-    AggregationPhase,
+    r#type::{Kind, Nullability},
 };
 
 use crate::catalog::{self, Func};
 use crate::emit::EmitError;
+use crate::model::DataType;
 use crate::plan::expr::{ColumnRef, Expr, JoinKey, Literal};
-use crate::plan::{LogicalPlan, NamedAggregate};
+use crate::plan::{LogicalPlan, NamedAggregate, ScanColumn};
 
 #[derive(Debug, Clone)]
 struct SchemaContext {
@@ -38,9 +37,9 @@ impl SchemaContext {
         }
     }
 
-    fn add_scan(&mut self, alias: &str, columns: &[String]) {
+    fn add_scan(&mut self, alias: &str, columns: &[ScanColumn]) {
         for col in columns {
-            self.columns.push((alias.to_string(), col.clone()));
+            self.columns.push((alias.to_string(), col.name.clone()));
         }
     }
 
@@ -83,7 +82,16 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
 
     let mut ctx = SchemaContext::new();
     let input_rel = emit_rel(input, &mut ctx)?;
-    let rel = emit_aggregate_rel(input_rel, group_by, aggregates, &mut ctx)?;
+
+    // A Substrait measure is a single aggregate call, so a composite metric
+    // such as `SUM(a) / COUNT(b)` becomes N measures plus a projection above
+    // the aggregate that recombines them.
+    let split = split_aggregates(aggregates);
+    let rel = emit_aggregate_rel(input_rel, group_by, &split.measures, &mut ctx)?;
+    let rel = match &split.projections {
+        None => rel,
+        Some(projections) => emit_project_rel(rel, group_by.len(), projections, &mut ctx)?,
+    };
 
     let mut output_names: Vec<String> = group_by.iter().map(output_name_for_expr).collect();
     for a in aggregates {
@@ -111,9 +119,8 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
 
 fn output_name_for_expr(expr: &Expr) -> String {
     match expr {
-        Expr::Column(c) if !c.dataset.is_empty() => format!("{}.{}", c.dataset, c.sql),
-        Expr::Column(c) => c.sql.clone(),
-        Expr::Sql(s) => s.clone(),
+        Expr::Column(c) if !c.dataset.is_empty() => format!("{}.{}", c.dataset, c.column),
+        Expr::Column(c) => c.column.clone(),
         _ => "expr".to_string(),
     }
 }
@@ -136,14 +143,14 @@ fn emit_rel(plan: &LogicalPlan, ctx: &mut SchemaContext) -> Result<proto::Rel, E
 fn emit_scan(
     source: &str,
     dataset: &str,
-    columns: &[String],
+    columns: &[ScanColumn],
     ctx: &mut SchemaContext,
 ) -> Result<proto::Rel, EmitError> {
     ctx.add_scan(dataset, columns);
 
-    let types: Vec<proto::Type> = columns.iter().map(|_| string_type()).collect();
+    let types: Vec<proto::Type> = columns.iter().map(|c| substrait_type(c.datatype)).collect();
     let base_schema = proto::NamedStruct {
-        names: columns.to_vec(),
+        names: columns.iter().map(|c| c.name.clone()).collect(),
         r#struct: Some(proto::r#type::Struct {
             types,
             type_variation_reference: 0,
@@ -187,7 +194,10 @@ fn emit_join(
 
     let mut cond = join_key_expr(&on[0], &left_ctx, &right_ctx, right_offset)?;
     for key in on.iter().skip(1) {
-        cond = and_two(cond, join_key_expr(key, &left_ctx, &right_ctx, right_offset)?);
+        cond = and_two(
+            cond,
+            join_key_expr(key, &left_ctx, &right_ctx, right_offset)?,
+        );
     }
 
     Ok(proto::Rel {
@@ -208,14 +218,19 @@ fn join_key_expr(
     right_offset: usize,
 ) -> Result<proto::Expression, EmitError> {
     let left_idx = left_ctx
-        .find_column(&key.left_dataset, &key.left_sql)
-        .ok_or_else(|| EmitError::ColumnNotFound(format!("{}.{}", key.left_dataset, key.left_sql)))?
-        as u32;
+        .find_column(&key.left_dataset, &key.left_column)
+        .ok_or_else(|| {
+            EmitError::ColumnNotFound(format!("{}.{}", key.left_dataset, key.left_column))
+        })? as u32;
     let right_local = right_ctx
-        .find_column(&key.right_dataset, &key.right_sql)
-        .ok_or_else(|| EmitError::ColumnNotFound(format!("{}.{}", key.right_dataset, key.right_sql)))?
-        as u32;
-    Ok(binary_eq_field_ref(left_idx, right_offset as u32 + right_local))
+        .find_column(&key.right_dataset, &key.right_column)
+        .ok_or_else(|| {
+            EmitError::ColumnNotFound(format!("{}.{}", key.right_dataset, key.right_column))
+        })? as u32;
+    Ok(binary_eq_field_ref(
+        left_idx,
+        right_offset as u32 + right_local,
+    ))
 }
 
 fn emit_filter(
@@ -260,10 +275,14 @@ fn emit_aggregate_rel(
         .map(|a| emit_measure(a, ctx))
         .collect::<Result<_, _>>()?;
 
+    // The AggregateRel emits one column per grouping followed by one per
+    // measure. Every grouping must take a slot here, named or not, or the
+    // measure indices below it shift.
     let mut new_ctx = SchemaContext::new();
-    for e in group_by {
-        if let Expr::Column(c) = e {
-            new_ctx.columns.push((c.dataset.clone(), c.sql.clone()));
+    for (i, e) in group_by.iter().enumerate() {
+        match e {
+            Expr::Column(c) => new_ctx.columns.push((c.dataset.clone(), c.column.clone())),
+            _ => new_ctx.columns.push((String::new(), format!("__group{i}"))),
         }
     }
     for a in aggregates {
@@ -282,27 +301,135 @@ fn emit_aggregate_rel(
     })
 }
 
+/// Metric expressions rearranged into Substrait's aggregate shape.
+struct AggregateSplit {
+    /// One bare aggregate per Substrait measure.
+    measures: Vec<NamedAggregate>,
+    /// `(metric name, expression over the measure outputs)`, or `None` when
+    /// every metric was already a bare aggregate and no projection is needed.
+    projections: Option<Vec<(String, Expr)>>,
+}
+
+fn split_aggregates(aggregates: &[NamedAggregate]) -> AggregateSplit {
+    let composite = aggregates
+        .iter()
+        .any(|a| !matches!(a.expr, Expr::Agg { .. }));
+    if !composite {
+        return AggregateSplit {
+            measures: aggregates.to_vec(),
+            projections: None,
+        };
+    }
+
+    let mut measures: Vec<NamedAggregate> = Vec::new();
+    let mut projections = Vec::with_capacity(aggregates.len());
+    for a in aggregates {
+        let rewritten = extract_aggregates(&a.expr, &mut measures);
+        projections.push((a.name.clone(), rewritten));
+    }
+    AggregateSplit {
+        measures,
+        projections: Some(projections),
+    }
+}
+
+/// Replace each aggregate subtree with a reference to a synthesized measure
+/// column, collecting the aggregates into `measures`. Identical aggregates
+/// share one measure.
+fn extract_aggregates(expr: &Expr, measures: &mut Vec<NamedAggregate>) -> Expr {
+    if matches!(expr, Expr::Agg { .. }) {
+        if let Some(existing) = measures.iter().find(|m| m.expr == *expr) {
+            return Expr::column("", existing.name.clone());
+        }
+        let name = format!("__agg{}", measures.len());
+        measures.push(NamedAggregate {
+            name: name.clone(),
+            expr: expr.clone(),
+        });
+        return Expr::column("", name);
+    }
+    expr.map_children(&mut |child| extract_aggregates(child, measures))
+}
+
+/// Project the grouping columns through unchanged and append one computed
+/// column per metric.
+fn emit_project_rel(
+    input: proto::Rel,
+    group_count: usize,
+    projections: &[(String, Expr)],
+    ctx: &mut SchemaContext,
+) -> Result<proto::Rel, EmitError> {
+    let expressions: Vec<proto::Expression> = projections
+        .iter()
+        .map(|(_, e)| emit_expr(e, ctx))
+        .collect::<Result<_, _>>()?;
+
+    // ProjectRel appends its expressions to the input columns, so the emit
+    // mapping selects the groupings plus the appended metrics, dropping the
+    // intermediate measures.
+    let input_width = ctx.len();
+    let mut output_mapping: Vec<i32> = (0..group_count as i32).collect();
+    output_mapping.extend((0..expressions.len()).map(|i| (input_width + i) as i32));
+
+    let mut new_ctx = SchemaContext::new();
+    new_ctx
+        .columns
+        .extend(ctx.columns.iter().take(group_count).cloned());
+    for (name, _) in projections {
+        new_ctx.columns.push((String::new(), name.clone()));
+    }
+    *ctx = new_ctx;
+
+    Ok(proto::Rel {
+        rel_type: Some(RelType::Project(Box::new(proto::ProjectRel {
+            common: Some(proto::RelCommon {
+                emit_kind: Some(proto::rel_common::EmitKind::Emit(proto::rel_common::Emit {
+                    output_mapping,
+                })),
+                ..Default::default()
+            }),
+            input: Some(Box::new(input)),
+            expressions,
+            ..Default::default()
+        }))),
+    })
+}
+
 fn emit_measure(agg: &NamedAggregate, ctx: &SchemaContext) -> Result<Measure, EmitError> {
-    let Expr::Agg { func, distinct, arg } = &agg.expr else {
+    let Expr::Agg {
+        func,
+        distinct,
+        args,
+    } = &agg.expr
+    else {
         return Err(EmitError::UnsupportedExpression(format!(
             "metric `{}` is not a structured aggregate",
             agg.name
         )));
     };
 
-    let function_reference = catalog::def(func.to_func()).anchor;
+    let function_reference = catalog::def(*func).anchor;
 
-    let arg_expr = match arg {
-        None => i64_literal(1),
-        Some(inner) => emit_expr(inner, ctx)?,
+    // `COUNT(*)` takes no argument; Substrait still wants one, so it counts a
+    // constant.
+    let arguments = if args.is_empty() {
+        vec![proto::FunctionArgument {
+            arg_type: Some(ArgType::Value(i64_literal(1))),
+        }]
+    } else {
+        args.iter()
+            .map(|a| {
+                Ok(proto::FunctionArgument {
+                    arg_type: Some(ArgType::Value(emit_expr(a, ctx)?)),
+                })
+            })
+            .collect::<Result<Vec<_>, EmitError>>()?
     };
 
     Ok(Measure {
         measure: Some(proto::AggregateFunction {
             function_reference,
-            arguments: vec![proto::FunctionArgument {
-                arg_type: Some(ArgType::Value(arg_expr)),
-            }],
+            arguments,
             output_type: None,
             phase: AggregationPhase::Unspecified as i32,
             invocation: if *distinct {
@@ -320,24 +447,65 @@ fn emit_expr(expr: &Expr, ctx: &SchemaContext) -> Result<proto::Expression, Emit
     match expr {
         Expr::Column(col) => emit_column_ref(col, ctx),
         Expr::Literal(lit) => emit_literal(lit),
-        Expr::Eq(l, r) => emit_binary_eq(l, r, ctx),
-        Expr::Ne(l, r) => emit_binary_ne(l, r, ctx),
-        Expr::And(exprs) => emit_and(exprs, ctx),
-        Expr::In { expr, values } => emit_in(expr, values, ctx),
+        Expr::Call { func, args } => emit_scalar_call(*func, args, ctx),
         Expr::Case {
             when_then,
             else_expr,
         } => emit_case(when_then, Some(else_expr.as_ref()), ctx),
-        Expr::Sub(l, r) => Ok(scalar(
-            Func::Subtract,
-            vec![emit_expr(l, ctx)?, emit_expr(r, ctx)?],
-        )),
-        Expr::CurrentDate => Ok(scalar(Func::CurrentDate, vec![])),
+        Expr::InList { expr, values } => emit_in_list(expr, values, ctx),
         Expr::Agg { .. } => Err(EmitError::UnsupportedExpression(
-            "aggregate Expr belongs in NamedAggregate".to_string(),
+            "aggregate belongs in an AggregateRel measure, not a scalar position".to_string(),
         )),
-        Expr::Sql(s) => Err(EmitError::UnsupportedExpression(format!("SQL: {s}"))),
     }
+}
+
+/// Emit a scalar function call.
+///
+/// Substrait's boolean `and`/`or` are binary, so a variadic conjunction folds
+/// into nested calls; everything else maps one-to-one.
+fn emit_scalar_call(
+    func: Func,
+    args: &[Expr],
+    ctx: &SchemaContext,
+) -> Result<proto::Expression, EmitError> {
+    let emitted = args
+        .iter()
+        .map(|a| emit_expr(a, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if matches!(func, Func::And | Func::Or) {
+        let identity = Literal::Bool(matches!(func, Func::And));
+        let mut it = emitted.into_iter();
+        let Some(first) = it.next() else {
+            return emit_literal(&identity);
+        };
+        return Ok(it.fold(first, |acc, next| scalar(func, vec![acc, next])));
+    }
+
+    Ok(scalar(func, emitted))
+}
+
+/// `expr IN (…)` — Substrait models this as a dedicated expression type.
+fn emit_in_list(
+    expr: &Expr,
+    values: &[Literal],
+    ctx: &SchemaContext,
+) -> Result<proto::Expression, EmitError> {
+    if values.is_empty() {
+        return emit_literal(&Literal::Bool(false));
+    }
+    let options = values
+        .iter()
+        .map(emit_literal)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(proto::Expression {
+        rex_type: Some(expression::RexType::SingularOrList(Box::new(
+            expression::SingularOrList {
+                value: Some(Box::new(emit_expr(expr, ctx)?)),
+                options,
+            },
+        ))),
+    })
 }
 
 fn emit_case(
@@ -370,50 +538,9 @@ fn emit_case(
 
 fn emit_column_ref(col: &ColumnRef, ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
     let idx = ctx
-        .find_column(&col.dataset, &col.sql)
-        .ok_or_else(|| EmitError::ColumnNotFound(format!("{}.{}", col.dataset, col.sql)))?;
+        .find_column(&col.dataset, &col.column)
+        .ok_or_else(|| EmitError::ColumnNotFound(format!("{}.{}", col.dataset, col.column)))?;
     emit_field_reference(idx as u32)
-}
-
-fn emit_in(
-    expr: &Expr,
-    values: &[Literal],
-    ctx: &SchemaContext,
-) -> Result<proto::Expression, EmitError> {
-    if values.is_empty() {
-        return emit_literal(&Literal::Bool(false));
-    }
-    let mut acc = emit_binary_eq(expr, &Expr::Literal(values[0].clone()), ctx)?;
-    for v in values.iter().skip(1) {
-        acc = or_two(acc, emit_binary_eq(expr, &Expr::Literal(v.clone()), ctx)?);
-    }
-    Ok(acc)
-}
-
-fn emit_binary_eq(l: &Expr, r: &Expr, ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
-    let left = emit_expr(l, ctx)?;
-    let right = emit_expr(r, ctx)?;
-    Ok(scalar(Func::Equal, vec![left, right]))
-}
-
-fn emit_binary_ne(l: &Expr, r: &Expr, ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
-    let left = emit_expr(l, ctx)?;
-    let right = emit_expr(r, ctx)?;
-    Ok(scalar(Func::NotEqual, vec![left, right]))
-}
-
-fn emit_and(exprs: &[Expr], ctx: &SchemaContext) -> Result<proto::Expression, EmitError> {
-    if exprs.is_empty() {
-        return emit_literal(&Literal::Bool(true));
-    }
-    if exprs.len() == 1 {
-        return emit_expr(&exprs[0], ctx);
-    }
-    let mut acc = emit_expr(&exprs[0], ctx)?;
-    for e in exprs.iter().skip(1) {
-        acc = and_two(acc, emit_expr(e, ctx)?);
-    }
-    Ok(acc)
 }
 
 fn emit_literal(lit: &Literal) -> Result<proto::Expression, EmitError> {
@@ -498,8 +625,75 @@ fn and_two(a: proto::Expression, b: proto::Expression) -> proto::Expression {
     scalar(Func::And, vec![a, b])
 }
 
-fn or_two(a: proto::Expression, b: proto::Expression) -> proto::Expression {
-    scalar(Func::Or, vec![a, b])
+/// Sub-second precision assumed when Ossie does not state one.
+///
+/// Substrait's deprecated `Time`/`Timestamp`/`TimestampTz` were defined as
+/// microseconds, and the `Precision*` types are their replacements, so 6
+/// preserves that meaning rather than inventing a resolution.
+const TIMESTAMP_PRECISION_MICROS: i32 = 6;
+
+/// Substrait type for a declared Ossie [`DataType`].
+///
+/// Types Ossie leaves under-specified map to Substrait's `unknown` rather than
+/// to an invented parameterization:
+///
+/// - `Decimal` — Substrait requires precision and scale; Ossie states neither,
+///   and a wrong scale changes values.
+/// - `Opaque` — explicitly "outside the portable vocabulary".
+/// - absent — `datatype` is optional in the core spec.
+///
+/// `Integer` widens to `i64`: Ossie leaves width unspecified, and `i64` holds
+/// every integral value Ossie can describe.
+fn substrait_type(datatype: Option<DataType>) -> proto::Type {
+    let nullability = Nullability::Nullable as i32;
+    let kind = match datatype {
+        Some(DataType::String) => Kind::String(proto::r#type::String {
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::Integer) => Kind::I64(proto::r#type::I64 {
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::Float) => Kind::Fp64(proto::r#type::Fp64 {
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::Boolean) => Kind::Bool(proto::r#type::Boolean {
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::Date) => Kind::Date(proto::r#type::Date {
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::Time) => Kind::PrecisionTime(proto::r#type::PrecisionTime {
+            precision: TIMESTAMP_PRECISION_MICROS,
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::DateTime) => Kind::PrecisionTimestamp(proto::r#type::PrecisionTimestamp {
+            precision: TIMESTAMP_PRECISION_MICROS,
+            type_variation_reference: 0,
+            nullability,
+        }),
+        Some(DataType::DateTimeTz) => {
+            Kind::PrecisionTimestampTz(proto::r#type::PrecisionTimestampTz {
+                precision: TIMESTAMP_PRECISION_MICROS,
+                type_variation_reference: 0,
+                nullability,
+            })
+        }
+        Some(DataType::Decimal) | Some(DataType::Opaque) | None => {
+            Kind::UserDefined(proto::r#type::UserDefined {
+                type_reference: catalog::UNKNOWN_TYPE_ANCHOR,
+                type_variation_reference: 0,
+                nullability,
+                type_parameters: vec![],
+            })
+        }
+    };
+    proto::Type { kind: Some(kind) }
 }
 
 fn string_type() -> proto::Type {
@@ -526,6 +720,7 @@ fn make_function_extension(urn_ref: u32, anchor: u32, name: &str) -> SimpleExten
 fn build_extension_urns() -> Vec<SimpleExtensionUrn> {
     catalog::extension_groups()
         .into_iter()
+        .chain(std::iter::once(catalog::UNKNOWN_TYPE))
         .map(|g| SimpleExtensionUrn {
             extension_urn_anchor: g.anchor,
             urn: g.urn.to_string(),
@@ -537,14 +732,32 @@ fn build_extensions() -> Vec<SimpleExtensionDeclaration> {
     catalog::CATALOG
         .iter()
         .map(|d| make_function_extension(d.group.anchor, d.anchor, d.name))
+        .chain(std::iter::once(make_type_extension(
+            catalog::UNKNOWN_TYPE.anchor,
+            catalog::UNKNOWN_TYPE_ANCHOR,
+            "unknown",
+        )))
         .collect()
+}
+
+fn make_type_extension(urn_ref: u32, anchor: u32, name: &str) -> SimpleExtensionDeclaration {
+    SimpleExtensionDeclaration {
+        mapping_type: Some(MappingType::ExtensionType(
+            proto::extensions::simple_extension_declaration::ExtensionType {
+                extension_urn_reference: urn_ref,
+                type_anchor: anchor,
+                name: name.to_string(),
+            },
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::expr::{AggFunc, Expr, Literal};
-    use crate::plan::{LogicalPlan, NamedAggregate};
+    use crate::catalog::Func;
+    use crate::plan::expr::{Expr, Literal};
+    use crate::plan::{LogicalPlan, NamedAggregate, ScanColumn};
 
     fn minimal_plan() -> LogicalPlan {
         LogicalPlan::Aggregate {
@@ -552,20 +765,25 @@ mod tests {
                 input: Box::new(LogicalPlan::Scan {
                     source: "warehouse.public.fact_table".into(),
                     dataset: "fact".into(),
-                    columns: vec!["id".into(), "day".into(), "month_days".into()],
+                    columns: vec![
+                        ScanColumn::new("id", None),
+                        ScanColumn::new("day", None),
+                        ScanColumn::new("month_days", None),
+                    ],
                 }),
-                predicate: Expr::Eq(
-                    Box::new(Expr::column("", "id")),
-                    Box::new(Expr::Literal(Literal::Int64(1))),
+                predicate: Expr::binary(
+                    Func::Equal,
+                    Expr::column("", "id"),
+                    Expr::Literal(Literal::Int64(1)),
                 ),
             }),
             group_by: vec![Expr::column("", "id")],
             aggregates: vec![NamedAggregate {
                 name: "row_count".into(),
                 expr: Expr::Agg {
-                    func: AggFunc::Count,
+                    func: Func::Count,
                     distinct: false,
-                    arg: None,
+                    args: vec![],
                 },
             }],
         }

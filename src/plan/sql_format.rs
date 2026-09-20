@@ -14,84 +14,78 @@ pub struct SqlCtx<'a> {
 }
 
 pub fn format_column(col: &ColumnRef, ctx: SqlCtx) -> String {
+    let name = ctx.dialect.quote_ident(&col.column);
     if ctx.qualify && !col.dataset.is_empty() {
-        let prefix = ctx.dialect.quote_table(&col.dataset);
-        format!("{prefix}.{}", col.sql)
+        // A dataset alias is one identifier, not a qualified source path.
+        format!("{}.{name}", ctx.dialect.quote_ident(&col.dataset))
     } else {
-        col.sql.clone()
+        name
     }
 }
 
 pub fn format_expr(expr: &Expr, ctx: SqlCtx) -> String {
     match expr {
         Expr::Column(c) => format_column(c, ctx),
-        Expr::Literal(lit) => format_literal(lit),
-        Expr::Eq(l, r) => ctx
-            .dialect
-            .render_func(Func::Equal, &[format_expr(l, ctx), format_expr(r, ctx)]),
-        Expr::Ne(l, r) => ctx
-            .dialect
-            .render_func(Func::NotEqual, &[format_expr(l, ctx), format_expr(r, ctx)]),
-        Expr::And(exprs) => ctx.dialect.render_func(
-            Func::And,
-            &exprs.iter().map(|e| format_expr(e, ctx)).collect::<Vec<_>>(),
-        ),
-        Expr::In { expr, values } => {
-            let vals: Vec<String> = values.iter().map(format_literal).collect();
-            format!("{} IN ({})", format_expr(expr, ctx), vals.join(", "))
+        Expr::Literal(lit) => format_literal(lit, ctx),
+        Expr::Call { func, args } => {
+            let rendered: Vec<String> = args.iter().map(|a| format_expr(a, ctx)).collect();
+            ctx.dialect.render_func(*func, &rendered)
+        }
+        Expr::Agg {
+            func,
+            distinct,
+            args,
+        } => {
+            let name = catalog::def(*func).name_for_sql();
+            let inner = if args.is_empty() {
+                "*".to_string()
+            } else {
+                args.iter()
+                    .map(|a| format_expr(a, ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let distinct = if *distinct { "DISTINCT " } else { "" };
+            format!("{name}({distinct}{inner})")
         }
         Expr::Case {
             when_then,
             else_expr,
         } => {
-            let mut parts = Vec::new();
-            for (when, then) in when_then {
-                parts.push(format!(
-                    "WHEN {} THEN {}",
-                    format_expr(when, ctx),
-                    format_expr(then, ctx)
-                ));
-            }
+            let arms: Vec<String> = when_then
+                .iter()
+                .map(|(w, t)| format!("WHEN {} THEN {}", format_expr(w, ctx), format_expr(t, ctx)))
+                .collect();
             format!(
                 "CASE {} ELSE {} END",
-                parts.join(" "),
+                arms.join(" "),
                 format_expr(else_expr, ctx)
             )
         }
-        Expr::Sub(l, r) => ctx
-            .dialect
-            .render_func(Func::Subtract, &[format_expr(l, ctx), format_expr(r, ctx)]),
-        Expr::CurrentDate => ctx.dialect.render_func(Func::CurrentDate, &[]),
-        Expr::Agg { func, distinct, arg } => {
-            let distinct_s = if *distinct { "DISTINCT " } else { "" };
-            let inner = match arg {
-                None => "*".to_string(),
-                Some(a) => format_expr(a, ctx),
-            };
-            let name = catalog::def(func.to_func()).call_name();
-            format!("{name}({distinct_s}{inner})")
+        Expr::InList { expr, values } => {
+            let vals: Vec<String> = values.iter().map(|v| format_literal(v, ctx)).collect();
+            format!("{} IN ({})", format_expr(expr, ctx), vals.join(", "))
         }
-        Expr::Sql(s) => s.clone(),
     }
 }
 
 pub fn format_join_on(keys: &[JoinKey], ctx: SqlCtx) -> Vec<String> {
     keys.iter()
         .map(|k| {
-            let l = format_column(&ColumnRef::new(&k.left_dataset, &k.left_sql), ctx);
-            let r = format_column(&ColumnRef::new(&k.right_dataset, &k.right_sql), ctx);
+            let l = format_column(&ColumnRef::new(&k.left_dataset, &k.left_column), ctx);
+            let r = format_column(&ColumnRef::new(&k.right_dataset, &k.right_column), ctx);
             ctx.dialect.render_func(Func::Equal, &[l, r])
         })
         .collect()
 }
 
-fn format_literal(lit: &Literal) -> String {
+fn format_literal(lit: &Literal, ctx: SqlCtx) -> String {
     match lit {
         Literal::Null => "NULL".to_string(),
         Literal::Bool(true) => "TRUE".to_string(),
         Literal::Bool(false) => "FALSE".to_string(),
         Literal::Int64(i) => i.to_string(),
         Literal::Float64(f) => f.to_string(),
-        Literal::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Literal::String(s) => ctx.dialect.quote_string_literal(s),
     }
 }
