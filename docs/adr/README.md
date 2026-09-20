@@ -10,7 +10,7 @@ is current.
 | # | Decision | Status |
 |---|----------|--------|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0002](0002-conformance-to-a-vendored-schema.md) | Check conformance against a vendored schema | Accepted |
+| [0002](0002-mirror-the-schema.md) | Mirror the schema, and check against a vendored copy | Accepted |
 | [0003](0003-compile-expressions-from-sql-text.md) | Compile expressions from their SQL text | Accepted |
 | [0004](0004-interpret-only-the-core-spec.md) | Interpret only the core spec | Accepted |
 | [0005](0005-one-catalog-describes-every-function.md) | One catalog describes every function | Accepted |

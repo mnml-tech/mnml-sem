@@ -61,6 +61,12 @@ Parse the expression text and lower it to the plan IR.
   model may legitimately declare `Orders` and `orders` as distinct. When a
   reference differs from a declared name only by case, the error says which
   name was declared, so matching as written is strict without being unhelpful.
+- **Which dialect entry is compiled is chosen, not asked for.** An expression
+  may carry several. The `ANSI_SQL` entry is preferred, then any other entry in
+  a dialect that can be parsed, then the first entry — which then fails if it
+  is not SQL. Preferring ANSI means the compiled expression is the portable
+  one, so the plan can be emitted to any target rather than to the vendor the
+  entry was written for.
 - **An expression may reference any dataset; the joins follow from it.** A
   metric naming `customers.id` causes the binder to find a join path, rather
   than requiring the query to ask for one. This is what makes
@@ -91,6 +97,11 @@ Parse the expression text and lower it to the plan IR.
 - Emitted SQL says what the model said. A field written `AMOUNT` is emitted as
   `AMOUNT`, so a reader can match the output against the model, and an engine
   with case-sensitive quoted columns is not broken by a normalization we chose.
+- The caller cannot say which dialect entry to compile. A model carrying both
+  `ANSI_SQL` and `BIGQUERY` is always compiled from the ANSI entry, even when
+  BigQuery is the target and the vendor entry was written to say something the
+  portable one cannot. The plan IR is dialect-neutral, so this is usually
+  invisible; where it is not, there is currently no way to ask.
 - Reuse across metrics is not available. A model repeating
   `SUM(orders.amount)` in five metrics repeats it five times, and a change has
   to be made five times.

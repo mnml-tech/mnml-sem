@@ -1,4 +1,4 @@
-# 0002. Check conformance against a vendored schema
+# 0002. Mirror the schema, and check against a vendored copy
 
 - Status: Accepted
 - Date: 2026-09-20
@@ -14,7 +14,15 @@ The failure mode is silent drift: upstream adds a dialect, changes which fields
 are required, or moves the version, and nothing notices until a real document
 fails to parse — or worse, parses and means something different.
 
-Three options:
+There is a prior question. The types could **mirror** the schema — one type per
+`$def`, the same field names, optional where the schema says optional — or they
+could be a **normalized internal model** the document is translated into, with
+the spec's awkward corners smoothed out on the way in. Translation gives nicer
+types to work with and insulates the rest of the crate from the spec. It also
+removes the correspondence that makes drift detectable: with nothing to compare
+type-for-type, there is no assertion to write beyond "it still parses".
+
+Three options for the drift itself:
 
 1. Trust the types and find out when a document breaks.
 2. Fetch the schema during tests. Accurate, but the test suite then needs the
@@ -22,6 +30,11 @@ Three options:
 3. Vendor the schema and assert the types agree with it.
 
 ## Decision
+
+**The model types mirror the schema.** One type per `$def`, field names as the
+schema spells them, `deny_unknown_fields` throughout, optionality following the
+schema's `required`. Nothing is smoothed over, renamed, or dropped, and the
+crate's own conveniences are methods on those types rather than a second shape.
 
 Vendor `ossie-schema.json` under [`spec/`](../../spec/), recording the upstream
 commit it came from, and assert in the test suite that:
@@ -46,4 +59,11 @@ contract, and the schema is how we check they are still right.
 - Tests are offline and deterministic.
 - The vendored copy can go stale. Nothing detects that automatically; refreshing
   it is a deliberate act.
+- The types are exactly as awkward as the spec is. `ai_context` is a string or
+  an object; a dialect entry has to be searched for rather than looked up;
+  `datatype` is optional everywhere it appears. Callers see all of that.
+- A spec change is a breaking change here. There is no insulating layer to
+  absorb it, which is the same property that makes the change visible.
+- Parts of the document are carried without being used — labels, descriptions,
+  AI context — because a document must round-trip to itself.
 

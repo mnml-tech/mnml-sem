@@ -26,6 +26,14 @@ evaluates *before* one the block has already occupied:
 From < Where < GroupBy < Select < OrderBy < Fetch
 ```
 
+A boundary is rendered as an **inline subquery**, not a common table
+expression. The emitter builds bottom-up and a subquery is the shape that
+falls out of it; hoisting to a `WITH` clause would mean accumulating fragments
+separately and assembling them at the statement head. More to the point,
+engines differ on whether a CTE is materialized — some always, some never,
+some by heuristic — so choosing one would be choosing a performance
+characteristic on the caller's behalf, invisibly.
+
 Wrapping a block rewrites the references that cross it: a subquery preserves its
 output names, so the wrapped block's columns move behind its alias. That
 includes join keys, which otherwise keep pointing at a dataset that is no longer
@@ -47,4 +55,8 @@ unparser.
 - Filtering after aggregating emits a subquery where `HAVING` would be
   idiomatic. Correct, but not what a person would write; folding that case is a
   later refinement on top of this structure.
+- A deeply nested plan produces deeply nested SQL, which is harder to read than
+  a sequence of named CTEs. If that becomes the complaint, hoisting the same
+  boundaries into a `WITH` clause is a change to rendering, not to where the
+  boundaries are.
 
