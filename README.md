@@ -10,7 +10,7 @@
 
 The crate also exposes **ANSI-style SQL** via [`emit::sql::to_sql`](src/emit/sql.rs) — derived from the same structured plan (debugging, legacy engines).
 
-- **Spec-aligned** — Types follow `core-spec/ossie-schema.json`; validation runs before planning.
+- **Spec-aligned** — Types follow `core-spec/ossie-schema.json`, and [`tests/conformance.rs`](tests/conformance.rs) checks them against a vendored copy of it ([`spec/`](spec/)), so upstream drift shows up as a failing test.
 - **Join-aware binding** — Relationships drive join paths; `dataset.field` references resolve through the model.
 - **Engine-agnostic execution** — Substrait decouples the semantic layer from any one runtime.
 - **Composable and lightweight** — Pure Rust library with no runtime server. Embed it in an API, CLI tool, or compute engine
@@ -71,6 +71,8 @@ let _sql = to_sql(&plan)?; // secondary: inspect or send to a SQL engine
 ```sh
 cargo test   # default feature `substrait` includes Substrait + SQL tests
 ```
+
+Conformance: [`spec/README.md`](spec/README.md) explains how to refresh the vendored Ossie schema; the tests then report exactly what moved.
 
 Fixtures: [`tests/fixtures/`](tests/fixtures/). The TPC-DS example test is **`#[ignore]`** unless you clone [Ossie](https://github.com/apache/ossie) next to this repo (`../ossie/examples/…`); then `cargo test -- --include-ignored`.
 

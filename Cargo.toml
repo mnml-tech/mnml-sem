@@ -24,3 +24,9 @@ sqlparser = "0.63"
 substrait = { version = "0.63", features = ["serde"], optional = true }
 prost = { version = "0.14", optional = true }
 thiserror = "2"
+
+[dev-dependencies]
+# Conformance tests only: the vendored Ossie schema is checked against this
+# crate's types and fixtures. The library itself does not validate with it —
+# the serde model types are the runtime contract.
+jsonschema = "0.56"
