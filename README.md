@@ -66,6 +66,12 @@ let _sql = to_sql(&plan)?; // secondary: inspect or send to a SQL engine
 
 (`minimal_model` / `row_count` / `fact` match [`tests/fixtures/minimal.yaml`](tests/fixtures/minimal.yaml).)
 
+## Why it works this way
+
+[`docs/adr/`](docs/adr/) records the decisions that are not obvious from the
+code — where the spec is silent, where it under-specifies something a target
+format requires, and where the obvious implementation would be wrong.
+
 ## Development
 
 ```sh
