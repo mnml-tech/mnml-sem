@@ -20,6 +20,78 @@ pub struct SemanticQuery {
     /// When no field references appear in `group_by` or filters, selects the scan target for metrics-only queries.
     #[serde(default)]
     pub dataset: Option<String>,
+    /// Ordering, applied to what the query selects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_by: Vec<OrderBy>,
+    /// Maximum rows to return. Omitted means all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// Rows to skip before the first returned row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+/// One ordering term.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderBy {
+    /// Something the query selects: a grouped `dataset.field` (or its bare
+    /// field name) or a metric name. Not an arbitrary expression — you order
+    /// by what you asked for.
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(default)]
+    pub direction: Direction,
+    /// Where nulls sort. Omitted means they sort as greater than non-nulls:
+    /// last when ascending, first when descending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulls: Option<NullOrder>,
+}
+
+impl OrderBy {
+    #[must_use]
+    pub fn asc(reference: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            direction: Direction::Asc,
+            nulls: None,
+        }
+    }
+
+    #[must_use]
+    pub fn desc(reference: impl Into<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            direction: Direction::Desc,
+            nulls: None,
+        }
+    }
+
+    /// Where nulls go, resolving the default.
+    #[must_use]
+    pub fn null_order(&self) -> NullOrder {
+        self.nulls.unwrap_or(match self.direction {
+            Direction::Asc => NullOrder::Last,
+            Direction::Desc => NullOrder::First,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    #[default]
+    Asc,
+    Desc,
+}
+
+/// Engines disagree on where nulls sort by default, and Substrait makes the
+/// choice part of the sort direction, so it is stated rather than assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NullOrder {
+    First,
+    Last,
 }
 
 /// Comparison used by a [`FilterSpec`].

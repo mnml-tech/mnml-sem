@@ -27,7 +27,7 @@ Ossie ──► validate ──► CompiledModel ──► bind_query(SemanticQu
 |------|----------------|
 | **I/O** | Parse Ossie documents from YAML or JSON (`parser`) |
 | **Validation** | Check documents (`validate`); compile expressions (`CompiledModel`) |
-| **Queries** | Bind [`SemanticQuery`](src/query/spec.rs) (group by, metrics, filters, optional dataset anchor) |
+| **Queries** | Bind [`SemanticQuery`](src/query/spec.rs) (group by, metrics, filters, ordering, limit/offset, optional dataset anchor) |
 | **Planning** | `LogicalPlan` for emission or inspection |
 | **Functions** | One [`catalog`](src/catalog.rs) row per function carries its arity, SQL rendering, and Substrait coordinates |
 | **Emit** | **`emit::substrait::to_plan`** — primary (default feature `substrait`) |

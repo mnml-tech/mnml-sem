@@ -20,6 +20,25 @@ pub trait SqlDialect {
     /// [`Dataset::source`]: crate::model::Dataset::source
     fn quote_source(&self, path: &str) -> String;
 
+    /// Render the row-limiting clause.
+    ///
+    /// ANSI SQL:2008 spells this `OFFSET n ROWS FETCH NEXT m ROWS ONLY`;
+    /// `LIMIT`/`OFFSET` is a common extension, not the standard. Returns an
+    /// empty string when there is nothing to limit.
+    fn render_fetch(&self, offset: u64, limit: Option<u64>) -> String {
+        let mut out = String::new();
+        if offset > 0 {
+            out.push_str(&format!("OFFSET {offset} ROWS"));
+        }
+        if let Some(limit) = limit {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&format!("FETCH NEXT {limit} ROWS ONLY"));
+        }
+        out
+    }
+
     /// Quote a string literal, including whatever escaping the dialect needs.
     ///
     /// The ANSI default doubles embedded single quotes. A dialect that also
@@ -103,6 +122,17 @@ impl SqlDialect for BigQuery {
         }
     }
 
+    /// BigQuery has no `FETCH NEXT`; it spells this `LIMIT`/`OFFSET`, and
+    /// `OFFSET` there requires a `LIMIT`.
+    fn render_fetch(&self, offset: u64, limit: Option<u64>) -> String {
+        match (limit, offset) {
+            (None, 0) => String::new(),
+            (None, n) => format!("LIMIT 9223372036854775807 OFFSET {n}"),
+            (Some(l), 0) => format!("LIMIT {l}"),
+            (Some(l), n) => format!("LIMIT {l} OFFSET {n}"),
+        }
+    }
+
     /// BigQuery string literals also honour backslash escapes, so a trailing
     /// backslash would otherwise escape the closing quote.
     fn quote_string_literal(&self, value: &str) -> String {
@@ -152,7 +182,10 @@ mod tests {
 
     #[test]
     fn bigquery_current_date_is_a_call() {
-        assert_eq!(BigQuery.render_func(Func::CurrentDate, &[]), "CURRENT_DATE()");
+        assert_eq!(
+            BigQuery.render_func(Func::CurrentDate, &[]),
+            "CURRENT_DATE()"
+        );
         assert_eq!(Ansi.render_func(Func::CurrentDate, &[]), "CURRENT_DATE");
     }
 

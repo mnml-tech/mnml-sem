@@ -2,4 +2,4 @@
 
 mod spec;
 
-pub use spec::{FilterOperator, FilterSpec, SemanticQuery};
+pub use spec::{Direction, FilterOperator, FilterSpec, NullOrder, OrderBy, SemanticQuery};

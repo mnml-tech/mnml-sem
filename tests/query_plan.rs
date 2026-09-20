@@ -10,7 +10,9 @@ use ossie_substrait::parser::from_yaml_str;
 use ossie_substrait::plan::expr::{Expr, Literal};
 use ossie_substrait::plan::{LogicalPlan, NamedExpr};
 use ossie_substrait::planner::build_logical_plan;
-use ossie_substrait::query::{FilterOperator, FilterSpec, SemanticQuery};
+use ossie_substrait::query::{
+    Direction, FilterOperator, FilterSpec, NullOrder, OrderBy, SemanticQuery,
+};
 use ossie_substrait::resolver::{QueryError, bind_query};
 
 fn minimal_doc() -> OssieDocument {
@@ -255,6 +257,7 @@ fn people_daily_tenant_model_validates_and_plans() {
             "people_daily.year",
             serde_json::json!([2024, 2025]),
         )],
+        ..Default::default()
     };
     let bound = bind_query(&model, &spec).expect("bind");
     build_logical_plan(&bound, &model).expect("plan");
@@ -1307,4 +1310,203 @@ fn substrait_measures_declare_known_types_only() {
         .expect("fn")
         .output_type;
     assert!(out.is_none(), "an unknown type must not be declared");
+}
+
+// ---------------------------------------------------------------------------
+// Ordering and row limits.
+// ---------------------------------------------------------------------------
+
+fn steelwheels_sorted(
+    metrics: &[&str],
+    group_by: &[&str],
+    order_by: Vec<OrderBy>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> LogicalPlan {
+    let model = steelwheels_model();
+    let spec = SemanticQuery {
+        group_by: group_by.iter().map(|s| (*s).to_string()).collect(),
+        metrics: metrics.iter().map(|s| (*s).to_string()).collect(),
+        dataset: Some("orderfact".into()),
+        order_by,
+        limit,
+        offset,
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    build_logical_plan(&bound, &model).expect("plan")
+}
+
+#[test]
+fn ordering_and_limit_shape_the_plan() {
+    let plan = steelwheels_sorted(
+        &["sales"],
+        &["dates.year_id"],
+        vec![OrderBy::desc("sales")],
+        Some(10),
+        Some(5),
+    );
+
+    let LogicalPlan::Fetch {
+        input,
+        offset,
+        limit,
+    } = &plan
+    else {
+        panic!("expected Fetch at the root, got {plan:?}");
+    };
+    assert_eq!((*offset, *limit), (5, Some(10)));
+
+    let LogicalPlan::Sort { keys, .. } = input.as_ref() else {
+        panic!("expected Sort under Fetch");
+    };
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].direction, Direction::Desc);
+    // Descending defaults nulls first: they sort as greater than non-nulls.
+    assert_eq!(keys[0].nulls, NullOrder::First);
+
+    // Neither node changes the columns.
+    assert_eq!(plan.output_schema(), input.output_schema());
+}
+
+/// Ordering by a metric works because Sort sits above the projection.
+#[test]
+fn ordering_by_a_metric_output() {
+    let sql = to_sql(&steelwheels_sorted(
+        &["avg_unit_price"],
+        &["dates.year_id"],
+        vec![OrderBy::desc("avg_unit_price")],
+        Some(3),
+        None,
+    ))
+    .expect("sql");
+    assert!(
+        sql.contains("ORDER BY avg_unit_price DESC NULLS FIRST"),
+        "{sql}"
+    );
+    assert!(sql.contains("FETCH NEXT 3 ROWS ONLY"), "{sql}");
+}
+
+#[test]
+fn ordering_by_a_grouped_field_either_spelling() {
+    for reference in ["dates.year_id", "year_id"] {
+        let sql = to_sql(&steelwheels_sorted(
+            &["sales"],
+            &["dates.year_id"],
+            vec![OrderBy::asc(reference)],
+            None,
+            None,
+        ))
+        .expect("sql");
+        assert!(sql.contains("ORDER BY"), "{reference}: {sql}");
+        assert!(sql.contains("ASC NULLS LAST"), "{reference}: {sql}");
+    }
+}
+
+/// You can only order by what you selected — anything else is a query error,
+/// with the available names listed.
+#[test]
+fn ordering_by_something_unselected_is_rejected() {
+    let model = steelwheels_model();
+    let spec = SemanticQuery {
+        metrics: vec!["sales".into()],
+        dataset: Some("orderfact".into()),
+        order_by: vec![OrderBy::desc("quantity")],
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    let err = build_logical_plan(&bound, &model).expect_err("quantity is not selected");
+    let msg = err.to_string();
+    assert!(msg.contains("not selected"), "{msg}");
+    assert!(
+        msg.contains("sales"),
+        "should list what is available: {msg}"
+    );
+}
+
+/// `LIMIT`/`OFFSET` is not ANSI; the standard spells it `FETCH NEXT`.
+#[test]
+fn row_limits_are_dialect_specific() {
+    let plan = steelwheels_sorted(&["sales"], &[], vec![], Some(10), Some(5));
+
+    let ansi = to_sql(&plan).expect("ansi");
+    assert!(
+        ansi.contains("OFFSET 5 ROWS FETCH NEXT 10 ROWS ONLY"),
+        "{ansi}"
+    );
+
+    let bq =
+        ossie_substrait::emit::sql::to_sql_with(&plan, &ossie_substrait::sql_dialect::BigQuery)
+            .expect("bigquery");
+    assert!(bq.contains("LIMIT 10 OFFSET 5"), "{bq}");
+    assert!(!bq.contains("FETCH NEXT"), "{bq}");
+}
+
+#[cfg(feature = "substrait")]
+#[test]
+fn sort_and_fetch_reach_the_substrait_plan() {
+    use substrait::proto::rel::RelType;
+    use substrait::proto::sort_field::{SortDirection, SortKind};
+
+    let plan = steelwheels_sorted(
+        &["sales"],
+        &["dates.year_id"],
+        vec![OrderBy::desc("sales")],
+        Some(10),
+        Some(5),
+    );
+    let substrait_plan = to_plan(&plan).expect("substrait");
+    let substrait::proto::plan_rel::RelType::Root(root) =
+        substrait_plan.relations[0].rel_type.clone().expect("rel")
+    else {
+        panic!("expected a root rel");
+    };
+
+    let Some(RelType::Fetch(fetch)) = root.input.expect("input").rel_type else {
+        panic!("expected a FetchRel at the top");
+    };
+    // The literal-expression forms, not the deprecated bare integers.
+    assert!(matches!(
+        fetch.offset_mode,
+        Some(substrait::proto::fetch_rel::OffsetMode::OffsetExpr(_))
+    ));
+    assert!(matches!(
+        fetch.count_mode,
+        Some(substrait::proto::fetch_rel::CountMode::CountExpr(_))
+    ));
+
+    let Some(RelType::Sort(sort)) = fetch.input.expect("fetch input").rel_type else {
+        panic!("expected a SortRel under the fetch");
+    };
+    assert_eq!(sort.sorts.len(), 1);
+    // Substrait folds nulls placement into the direction.
+    assert_eq!(
+        sort.sorts[0].sort_kind,
+        Some(SortKind::Direction(SortDirection::DescNullsFirst as i32))
+    );
+}
+
+#[test]
+fn explicit_nulls_ordering_overrides_the_default() {
+    let plan = steelwheels_sorted(
+        &["sales"],
+        &[],
+        vec![OrderBy {
+            reference: "sales".into(),
+            direction: Direction::Desc,
+            nulls: Some(NullOrder::Last),
+        }],
+        None,
+        None,
+    );
+    assert!(to_sql(&plan).expect("sql").contains("DESC NULLS LAST"));
+}
+
+#[test]
+fn a_query_without_ordering_is_unchanged() {
+    let plan = steelwheels_sorted(&["sales"], &[], vec![], None, None);
+    assert!(
+        matches!(plan, LogicalPlan::Aggregate { .. }),
+        "no Sort or Fetch should appear: {plan:?}"
+    );
 }

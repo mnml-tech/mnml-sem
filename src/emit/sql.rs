@@ -5,8 +5,9 @@
 use std::collections::HashMap;
 
 use crate::emit::EmitError;
-use crate::plan::{Expr, LogicalPlan, NamedExpr};
+use crate::plan::{Expr, LogicalPlan, NamedExpr, SortKey};
 use crate::plan::{SqlCtx, format_expr, format_join_on};
+use crate::query::{Direction, NullOrder};
 use crate::sql_dialect::{Ansi, SqlDialect};
 
 /// Build a single ANSI `SELECT` statement for the plan tree.
@@ -20,8 +21,31 @@ pub fn to_sql(plan: &LogicalPlan) -> Result<String, EmitError> {
 /// emitted as a subquery: SQL allows a composite of aggregates directly in the
 /// select list, so the measures the planner lifted out are put back.
 pub fn to_sql_with(plan: &LogicalPlan, dialect: &dyn SqlDialect) -> Result<String, EmitError> {
-    let (aggregate, projection) = match plan {
-        LogicalPlan::Aggregate { .. } => (plan, None),
+    // Trailing clauses become suffixes on the one SELECT, so peel them first.
+    let mut core = plan;
+    let mut sort_keys: &[SortKey] = &[];
+    let (mut offset, mut limit) = (0u64, None);
+    loop {
+        match core {
+            LogicalPlan::Sort { input, keys } => {
+                sort_keys = keys;
+                core = input;
+            }
+            LogicalPlan::Fetch {
+                input,
+                offset: o,
+                limit: l,
+            } => {
+                offset = *o;
+                limit = *l;
+                core = input;
+            }
+            _ => break,
+        }
+    }
+
+    let (aggregate, projection) = match core {
+        LogicalPlan::Aggregate { .. } => (core, None),
         LogicalPlan::Project { input, exprs }
             if matches!(**input, LogicalPlan::Aggregate { .. }) =>
         {
@@ -68,7 +92,37 @@ pub fn to_sql_with(plan: &LogicalPlan, dialect: &dyn SqlDialect) -> Result<Strin
         }
     };
 
-    emit_aggregate_root(input.as_ref(), group_by, &outputs, ctx)
+    let mut sql = emit_aggregate_root(input.as_ref(), group_by, &outputs, ctx)?;
+
+    if !sort_keys.is_empty() {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&format_sort_keys(sort_keys, ctx));
+    }
+    let fetch = ctx.dialect.render_fetch(offset, limit);
+    if !fetch.is_empty() {
+        sql.push(' ');
+        sql.push_str(&fetch);
+    }
+    Ok(sql)
+}
+
+/// Nulls placement is always spelled out: engines disagree on the default,
+/// which is why the plan carries it.
+fn format_sort_keys(keys: &[SortKey], ctx: SqlCtx) -> String {
+    keys.iter()
+        .map(|k| {
+            let direction = match k.direction {
+                Direction::Asc => "ASC",
+                Direction::Desc => "DESC",
+            };
+            let nulls = match k.nulls {
+                NullOrder::First => "NULLS FIRST",
+                NullOrder::Last => "NULLS LAST",
+            };
+            format!("{} {direction} {nulls}", format_expr(&k.expr, ctx))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Substitute references to lifted measures back with the aggregates
@@ -202,8 +256,11 @@ fn from_join_or_scan(plan: &LogicalPlan, ctx: SqlCtx) -> Result<String, EmitErro
         LogicalPlan::Filter { .. } => {
             Err(EmitError::InvalidPlan("Filter must be peeled before FROM"))
         }
-        LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(EmitError::Unsupported(
-            "nested Aggregate/Project under FROM",
+        LogicalPlan::Aggregate { .. }
+        | LogicalPlan::Project { .. }
+        | LogicalPlan::Sort { .. }
+        | LogicalPlan::Fetch { .. } => Err(EmitError::Unsupported(
+            "nested Aggregate/Project/Sort/Fetch under FROM",
         )),
     }
 }

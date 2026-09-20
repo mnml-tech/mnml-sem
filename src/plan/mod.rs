@@ -6,6 +6,7 @@ pub mod ossie_sql;
 mod sql_format;
 
 use crate::model::{DataType, Dialect, Expression};
+use crate::query::{Direction, NullOrder};
 
 pub use display::DisplayIndent;
 pub use expr::{ColumnRef, Expr, JoinKey, Literal};
@@ -49,6 +50,27 @@ pub enum LogicalPlan {
         /// pass through unchanged.
         exprs: Vec<NamedExpr>,
     },
+    /// Order rows. Schema is the input's.
+    Sort {
+        input: Box<LogicalPlan>,
+        keys: Vec<SortKey>,
+    },
+    /// Skip `offset` rows, then return at most `limit`. Schema is the input's.
+    Fetch {
+        input: Box<LogicalPlan>,
+        offset: u64,
+        limit: Option<u64>,
+    },
+}
+
+/// One ordering term of a [`LogicalPlan::Sort`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortKey {
+    pub expr: Expr,
+    pub direction: Direction,
+    /// Always stated: Substrait folds it into the sort direction, and engines
+    /// disagree on the default.
+    pub nulls: NullOrder,
 }
 
 /// A column produced by a plan node.
@@ -98,7 +120,9 @@ impl LogicalPlan {
                 out.extend(right.output_schema());
                 out
             }
-            LogicalPlan::Filter { input, .. } => input.output_schema(),
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Fetch { input, .. } => input.output_schema(),
             LogicalPlan::Aggregate {
                 input,
                 group_by,

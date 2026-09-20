@@ -58,6 +58,13 @@ pub enum QueryError {
     #[error("column {column:?} is not in scope; available: {available}")]
     ColumnNotInScope { column: String, available: String },
 
+    /// You can only order by what the query selects.
+    #[error("cannot order by {reference:?}: it is not selected; available: {available}")]
+    OrderByNotSelected {
+        reference: String,
+        available: String,
+    },
+
     /// Parsed as SQL, but outside the Ossie expression profile (or not yet
     /// implemented here) — e.g. a subquery or a window function.
     #[error("unsupported expression: {0}")]

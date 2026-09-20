@@ -86,6 +86,31 @@ fn write_node(
             writeln!(f, "{pad}Aggregate: groupBy={gb}, aggr=[{ag}]")?;
             write_node(f, input, depth + 1, qualify)
         }
+        LogicalPlan::Sort { input, keys } => {
+            let ks = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{} {:?} nulls {:?}",
+                        format_expr(&k.expr, ctx(qualify)),
+                        k.direction,
+                        k.nulls
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(f, "{pad}Sort: [{ks}]")?;
+            write_node(f, input, depth + 1, qualify)
+        }
+        LogicalPlan::Fetch {
+            input,
+            offset,
+            limit,
+        } => {
+            let limit = limit.map_or("all".to_string(), |n| n.to_string());
+            writeln!(f, "{pad}Fetch: limit={limit}, offset={offset}")?;
+            write_node(f, input, depth + 1, qualify)
+        }
         LogicalPlan::Project { input, exprs } => {
             let cols = exprs
                 .iter()

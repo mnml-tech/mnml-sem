@@ -47,6 +47,10 @@ pub struct BoundQuery {
     pub group_by: Vec<ResolvedField>,
     pub metrics: Vec<CompiledMetric>,
     pub filters: Vec<BoundFilter>,
+    /// Trailing clauses, resolved against the plan's output by the planner.
+    pub order_by: Vec<crate::query::OrderBy>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
 }
 
 /// Resolve `spec` against `model`.
@@ -188,6 +192,9 @@ pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQu
         group_by,
         metrics,
         filters,
+        order_by: spec.order_by.clone(),
+        limit: spec.limit,
+        offset: spec.offset,
     })
 }
 

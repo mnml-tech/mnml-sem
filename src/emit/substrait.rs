@@ -23,7 +23,8 @@ use crate::catalog::{self, Func};
 use crate::emit::EmitError;
 use crate::model::DataType;
 use crate::plan::expr::{ColumnRef, Expr, JoinKey, Literal};
-use crate::plan::{LogicalPlan, NamedExpr, ScanColumn, SchemaColumn, find_column};
+use crate::plan::{LogicalPlan, NamedExpr, ScanColumn, SchemaColumn, SortKey, find_column};
+use crate::query::{Direction, NullOrder};
 
 #[derive(Debug, Clone)]
 /// The columns a field reference resolves against, taken from the plan's own
@@ -59,8 +60,17 @@ pub fn encode_plan(plan: &proto::Plan) -> Vec<u8> {
 /// The root is an [`LogicalPlan::Aggregate`], or a [`LogicalPlan::Project`]
 /// over one when a metric combines several aggregates.
 pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
-    let (aggregate, projection) = match plan {
-        LogicalPlan::Aggregate { .. } => (plan, None),
+    // Sort and Fetch sit above the aggregate core; peel them first so the
+    // core is matched the same way whether or not they are present.
+    let mut trailing: Vec<&LogicalPlan> = Vec::new();
+    let mut core = plan;
+    while let LogicalPlan::Sort { input, .. } | LogicalPlan::Fetch { input, .. } = core {
+        trailing.push(core);
+        core = input;
+    }
+
+    let (aggregate, projection) = match core {
+        LogicalPlan::Aggregate { .. } => (core, None),
         LogicalPlan::Project { input, exprs }
             if matches!(**input, LogicalPlan::Aggregate { .. }) =>
         {
@@ -99,6 +109,17 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
         }
     };
 
+    // Re-apply the peeled operators, innermost first.
+    let mut rel = rel;
+    let out_ctx = SchemaContext::of(core_plan_output(plan));
+    for node in trailing.into_iter().rev() {
+        rel = match node {
+            LogicalPlan::Sort { keys, .. } => emit_sort_rel(rel, keys, &out_ctx)?,
+            LogicalPlan::Fetch { offset, limit, .. } => emit_fetch_rel(rel, *offset, *limit),
+            _ => unreachable!("only Sort and Fetch are peeled"),
+        };
+    }
+
     Ok(proto::Plan {
         version: Some(proto::Version {
             major_number: 0,
@@ -118,6 +139,69 @@ pub fn to_plan(plan: &LogicalPlan) -> Result<proto::Plan, EmitError> {
     })
 }
 
+/// The node whose schema the trailing operators see: Sort and Fetch pass
+/// their input through, so it is the aggregate core's output.
+fn core_plan_output(plan: &LogicalPlan) -> &LogicalPlan {
+    let mut core = plan;
+    while let LogicalPlan::Sort { input, .. } | LogicalPlan::Fetch { input, .. } = core {
+        core = input;
+    }
+    core
+}
+
+fn emit_sort_rel(
+    input: proto::Rel,
+    keys: &[SortKey],
+    ctx: &SchemaContext,
+) -> Result<proto::Rel, EmitError> {
+    let sorts = keys
+        .iter()
+        .map(|k| {
+            Ok(proto::SortField {
+                expr: Some(emit_expr(&k.expr, ctx)?),
+                sort_kind: Some(proto::sort_field::SortKind::Direction(
+                    sort_direction(k) as i32
+                )),
+            })
+        })
+        .collect::<Result<Vec<_>, EmitError>>()?;
+
+    Ok(proto::Rel {
+        rel_type: Some(RelType::Sort(Box::new(proto::SortRel {
+            input: Some(Box::new(input)),
+            sorts,
+            ..Default::default()
+        }))),
+    })
+}
+
+/// Substrait folds nulls placement into the direction, which is why the plan
+/// always states it.
+fn sort_direction(key: &SortKey) -> proto::sort_field::SortDirection {
+    use proto::sort_field::SortDirection as D;
+    match (key.direction, key.nulls) {
+        (Direction::Asc, NullOrder::First) => D::AscNullsFirst,
+        (Direction::Asc, NullOrder::Last) => D::AscNullsLast,
+        (Direction::Desc, NullOrder::First) => D::DescNullsFirst,
+        (Direction::Desc, NullOrder::Last) => D::DescNullsLast,
+    }
+}
+
+fn emit_fetch_rel(input: proto::Rel, offset: u64, limit: Option<u64>) -> proto::Rel {
+    proto::Rel {
+        rel_type: Some(RelType::Fetch(Box::new(proto::FetchRel {
+            input: Some(Box::new(input)),
+            // The literal-expression forms; the bare int64 fields are deprecated.
+            offset_mode: (offset > 0).then(|| {
+                proto::fetch_rel::OffsetMode::OffsetExpr(Box::new(i64_literal(offset as i64)))
+            }),
+            count_mode: limit
+                .map(|n| proto::fetch_rel::CountMode::CountExpr(Box::new(i64_literal(n as i64)))),
+            ..Default::default()
+        }))),
+    }
+}
+
 fn output_name_for_expr(expr: &Expr) -> String {
     match expr {
         Expr::Column(c) if !c.dataset.is_empty() => format!("{}.{}", c.dataset, c.column),
@@ -135,7 +219,10 @@ fn emit_rel(plan: &LogicalPlan) -> Result<proto::Rel, EmitError> {
         } => emit_scan(source, plan, columns),
         LogicalPlan::Join { left, right, on } => emit_join(left, right, on),
         LogicalPlan::Filter { input, predicate } => emit_filter(input, predicate),
-        LogicalPlan::Aggregate { .. } | LogicalPlan::Project { .. } => Err(EmitError::InvalidPlan(
+        LogicalPlan::Aggregate { .. }
+        | LogicalPlan::Project { .. }
+        | LogicalPlan::Sort { .. }
+        | LogicalPlan::Fetch { .. } => Err(EmitError::InvalidPlan(
             "unexpected nested Aggregate in input rel",
         )),
     }

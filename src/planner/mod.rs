@@ -5,8 +5,10 @@
 
 use crate::compiled::CompiledModel;
 use crate::plan::{
-    ColumnRef, Expr, Literal, LogicalPlan, NamedExpr, ScanColumn, SchemaColumn, find_column,
+    ColumnRef, Expr, Literal, LogicalPlan, NamedExpr, ScanColumn, SchemaColumn, SortKey,
+    find_column,
 };
+use crate::query::OrderBy;
 use crate::resolver::{BoundQuery, QueryError, ResolvedField};
 
 /// A group-by or filter field, qualified by its dataset.
@@ -202,8 +204,68 @@ pub fn build_logical_plan(
         }
     };
 
+    // Ordering goes above the projection, so it can name metric outputs.
+    let plan = match sort_keys(&plan, &bound.order_by)? {
+        keys if keys.is_empty() => plan,
+        keys => LogicalPlan::Sort {
+            input: Box::new(plan),
+            keys,
+        },
+    };
+
+    let plan = if bound.limit.is_some() || bound.offset.unwrap_or(0) > 0 {
+        LogicalPlan::Fetch {
+            input: Box::new(plan),
+            offset: bound.offset.unwrap_or(0),
+            limit: bound.limit,
+        }
+    } else {
+        plan
+    };
+
     check_plan_columns(&plan)?;
     Ok(plan)
+}
+
+/// Resolve each ordering term against what the plan actually produces.
+fn sort_keys(plan: &LogicalPlan, order_by: &[OrderBy]) -> Result<Vec<SortKey>, QueryError> {
+    if order_by.is_empty() {
+        return Ok(Vec::new());
+    }
+    let schema = plan.output_schema();
+    order_by
+        .iter()
+        .map(|o| {
+            // `dataset.field`, or a bare name — which also matches a metric,
+            // since a metric output carries no dataset.
+            let (dataset, name) = match o.reference.split_once('.') {
+                Some((d, n)) if !d.is_empty() && !n.is_empty() => (d, n),
+                _ => ("", o.reference.as_str()),
+            };
+            let index = find_column(&schema, dataset, name).ok_or_else(|| {
+                QueryError::OrderByNotSelected {
+                    reference: o.reference.clone(),
+                    available: schema
+                        .iter()
+                        .map(|c| {
+                            if c.dataset.is_empty() {
+                                c.name.clone()
+                            } else {
+                                format!("{}.{}", c.dataset, c.name)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                }
+            })?;
+            let col = &schema[index];
+            Ok(SortKey {
+                expr: Expr::column(&col.dataset, &col.name),
+                direction: o.direction,
+                nulls: o.null_order(),
+            })
+        })
+        .collect()
 }
 
 /// Name a pass-through expression gets as an output column.
@@ -228,6 +290,8 @@ pub fn check_plan_columns(plan: &LogicalPlan) -> Result<(), QueryError> {
             return check_plan_columns(right);
         }
         LogicalPlan::Filter { input, predicate } => (input, vec![predicate]),
+        LogicalPlan::Sort { input, keys } => (input, keys.iter().map(|k| &k.expr).collect()),
+        LogicalPlan::Fetch { input, .. } => (input, vec![]),
         LogicalPlan::Aggregate {
             input,
             group_by,
