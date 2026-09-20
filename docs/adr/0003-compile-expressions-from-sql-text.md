@@ -45,6 +45,15 @@ Parse the expression text and lower it to the plan IR.
   physical columns of its dataset; a metric's expression resolves
   `dataset.field` through the model to that field's definition. Without the
   split, a field whose expression is `id` would resolve to itself forever.
+- **Identifier text is preserved, and entity names are matched as written.**
+  Whether an unquoted SQL identifier is case-insensitive is a question for the
+  engine running the query, answered against its own catalog; this crate
+  forwards the identifier, and folding its case would change the SQL emitted
+  and could not be undone. A `dataset.field` reference is not a SQL identifier
+  at all — it names a `name` in the document, which the schema constrains in no
+  way — so it is compared to what the document declares. When a reference
+  differs from a declared name only by case, the error says which name was
+  declared, so exact matching is strict without being unhelpful.
 
 ## Consequences
 
@@ -56,4 +65,8 @@ Parse the expression text and lower it to the plan IR.
 - We inherit a SQL parser's surface area and have to gate it. That gate is the
   main place this crate can be too strict or too lax.
 - A model can only be compiled for a dialect this crate can parse.
+- A model whose entity names are not lowercase works, and one whose references
+  disagree with its declarations about case does not. The alternative — folding
+  both sides — would make two distinct names collide, since the spec permits a
+  model to declare both `Orders` and `orders`.
 

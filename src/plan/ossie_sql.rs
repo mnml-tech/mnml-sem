@@ -182,7 +182,7 @@ fn lower(e: &ast::Expr, ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
 
 /// Resolve an identifier path to a column or a field's expression.
 fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
-    let names: Vec<String> = parts.iter().map(normalize_ident).collect();
+    let names: Vec<String> = parts.iter().map(identifier_text).collect();
     let (dataset, name) = match names.as_slice() {
         [name] => {
             let ds = ctx.dataset.ok_or_else(|| {
@@ -204,17 +204,35 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
         return Ok(Expr::column(dataset, name));
     };
 
-    // Metric mode: the identifier names a field, which carries its own expression.
+    // Metric mode: the identifier names a field, which carries its own
+    // expression. Entity names are strings in the document, so they are
+    // matched as written.
     let ds = model
         .datasets
         .iter()
         .find(|d| d.name == dataset)
-        .ok_or_else(|| QueryError::DatasetNotFound(dataset.clone()))?;
-    let field = ds
-        .fields
-        .iter()
-        .find(|f| f.name == name)
-        .ok_or_else(|| QueryError::FieldNotFound(format!("{dataset}.{name}")))?;
+        .ok_or_else(|| {
+            let declared = model.datasets.iter().map(|d| d.name.as_str());
+            match only_case_differs(&dataset, declared) {
+                Some(declared) => QueryError::CaseMismatch {
+                    kind: "dataset",
+                    wanted: dataset.clone(),
+                    declared,
+                },
+                None => QueryError::DatasetNotFound(dataset.clone()),
+            }
+        })?;
+    let field = ds.fields.iter().find(|f| f.name == name).ok_or_else(|| {
+        let declared = ds.fields.iter().map(|f| f.name.as_str());
+        match only_case_differs(&name, declared) {
+            Some(declared) => QueryError::CaseMismatch {
+                kind: "field",
+                wanted: format!("{dataset}.{name}"),
+                declared,
+            },
+            None => QueryError::FieldNotFound(format!("{dataset}.{name}")),
+        }
+    })?;
 
     let (field_dialect, sql) = super::pick_expression_dialect(&field.expression)
         .ok_or(QueryError::MissingExpressionSql)?;
@@ -226,11 +244,25 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
     lower_field_expression(&sql, dialect, &dataset)
 }
 
-/// Ossie identifier rules: case-insensitive unless quoted, max 128 characters.
-fn normalize_ident(id: &ast::Ident) -> String {
-    match id.quote_style {
-        Some(_) => id.value.clone(),
-        None => id.value.to_lowercase(),
+/// An identifier exactly as written, quoted or not.
+///
+/// Whether an unquoted SQL identifier is case-insensitive is a question for
+/// the engine that runs the query, and it answers it against its own catalog.
+/// This crate forwards the identifier; folding its case here would change the
+/// SQL emitted and could not be undone. A reference to a model entity is not a
+/// SQL identifier at all — it names a `name` in the document — so it is
+/// matched as written too.
+fn identifier_text(id: &ast::Ident) -> String {
+    id.value.clone()
+}
+
+/// The one declared name that differs from `wanted` only by case, if there is
+/// exactly one — so matching as written is strict without being unhelpful.
+fn only_case_differs<'a>(wanted: &str, declared: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut near = declared.filter(|d| *d != wanted && d.eq_ignore_ascii_case(wanted));
+    match (near.next(), near.next()) {
+        (Some(only), None) => Some(only.to_string()),
+        _ => None,
     }
 }
 
@@ -905,17 +937,77 @@ datasets:
         assert!(err.to_string().contains("not a SQL dialect"), "{err}");
     }
 
+    /// An identifier is forwarded as written. Folding its case here would
+    /// change the SQL emitted, and whether that matters is the engine's
+    /// question to answer against its own catalog.
     #[test]
-    fn quoted_identifiers_keep_their_case() {
-        let e = field_expr("\"MixedCase\"");
+    fn identifiers_keep_the_case_they_were_written_with() {
+        for spelling in ["MixedCase", "\"MixedCase\""] {
+            let e = field_expr(spelling);
+            assert!(
+                matches!(&e, Expr::Column(c) if c.column == "MixedCase"),
+                "{spelling}: {e:?}"
+            );
+        }
+        let e = field_expr("lower_case");
         assert!(
-            matches!(&e, Expr::Column(c) if c.column == "MixedCase"),
+            matches!(&e, Expr::Column(c) if c.column == "lower_case"),
             "{e:?}"
         );
-        let e = field_expr("MixedCase");
-        assert!(
-            matches!(&e, Expr::Column(c) if c.column == "mixedcase"),
-            "{e:?}"
-        );
+    }
+
+    /// Model entity names are strings in the document. Nothing in the schema
+    /// says they are lowercase, so a metric may reference them as declared.
+    #[test]
+    fn metrics_can_reference_mixed_case_entity_names() {
+        let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: Orders
+    source: s.orders
+    fields:
+      - name: Amount
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: Amount }]
+"#;
+        let model = from_yaml_str(yaml).expect("parse").model;
+        let e = lower_metric_expression("SUM(Orders.Amount)", Dialect::AnsiSql, &model)
+            .expect("a mixed-case reference must resolve");
+        assert!(matches!(&e, Expr::Agg { .. }), "{e:?}");
+    }
+
+    /// Matching as written, but the error says what was declared.
+    #[test]
+    fn a_case_mismatch_suggests_the_declared_name() {
+        let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: Orders
+    source: s.orders
+    fields:
+      - name: Amount
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: Amount }]
+"#;
+        let model = from_yaml_str(yaml).expect("parse").model;
+
+        let err = lower_metric_expression("SUM(orders.Amount)", Dialect::AnsiSql, &model)
+            .expect_err("the dataset is declared as Orders");
+        assert!(err.to_string().contains("declares \"Orders\""), "{err}");
+
+        let err = lower_metric_expression("SUM(Orders.amount)", Dialect::AnsiSql, &model)
+            .expect_err("the field is declared as Amount");
+        assert!(err.to_string().contains("declares \"Amount\""), "{err}");
+    }
+
+    /// No suggestion when there is nothing close, and none that is ambiguous.
+    #[test]
+    fn a_missing_name_suggests_nothing() {
+        let err = lower_metric_expression("SUM(orders.nope)", Dialect::AnsiSql, &model())
+            .expect_err("no such field");
+        assert!(err.to_string().contains("nope"), "{err}");
+        assert!(!err.to_string().contains("declares"), "{err}");
     }
 }

@@ -15,6 +15,15 @@ pub enum QueryError {
     #[error("metric not found: {0:?}")]
     MetricNotFound(String),
 
+    /// A reference differs from a declared name only by case. Names in a
+    /// document are strings, matched as written.
+    #[error("{kind} {wanted:?} not found; the model declares {declared:?}")]
+    CaseMismatch {
+        kind: &'static str,
+        wanted: String,
+        declared: String,
+    },
+
     #[error("invalid field reference {0:?}: expected dataset.field")]
     InvalidFieldRef(String),
 
