@@ -31,7 +31,7 @@ Ossie ──► validate ──► CompiledModel ──► bind_query(SemanticQu
 | **Planning** | `LogicalPlan` for emission or inspection; refuses a metric a join would inflate rather than returning a wrong number |
 | **Functions** | One [`catalog`](src/catalog.rs) row per function carries its arity, SQL rendering, and Substrait coordinates |
 | **Emit** | **`emit::substrait::to_plan`** — primary (default feature `substrait`) |
-| **Emit** | `emit::sql::to_sql` — secondary; same structured plan |
+| **Emit** | `emit::sql::to_sql` — secondary; same structured plan, coalescing a maximal `SELECT` and opening a subquery only at a clause conflict |
 | **Expressions** | SQL expressions (`ANSI_SQL`, `SNOWFLAKE`, `DATABRICKS`, `BIGQUERY`) parsed with [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and lowered to the plan IR ([`plan::ossie_sql`](src/plan/ossie_sql.rs)) |
 | **Metrics** | Composite metrics (`SUM(a) / COUNT(DISTINCT b)`) split into Substrait measures plus a projection; cross-dataset metrics pull in their own joins |
 
