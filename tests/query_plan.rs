@@ -1639,3 +1639,86 @@ fn the_binder_identifies_the_repeated_side() {
         "the one side is the repeated one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Identifiers: matched case-insensitively, emitted as written.
+// ---------------------------------------------------------------------------
+
+/// Two fields spelling one underlying column differently name one column, and
+/// the SQL keeps the spelling each field was written with.
+#[test]
+fn column_spellings_differing_only_by_case_are_one_column() {
+    let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: t
+    source: s.t
+    fields:
+      - name: lower
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: amount }]
+      - name: upper
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: AMOUNT }]
+metrics:
+  - name: total
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(t.upper)" }]
+"#;
+    let doc = from_yaml_str(yaml).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+
+    // One scan column, not two.
+    let cols = model.dataset("t").expect("dataset").scan_columns();
+    assert_eq!(cols.len(), 1, "{cols:?}");
+    assert_eq!(cols[0].0, "amount", "the first spelling is the one exposed");
+
+    // The reference resolves against it despite the different case, and the
+    // emitted SQL keeps what the field was written with.
+    let spec = SemanticQuery {
+        metrics: vec!["total".into()],
+        dataset: Some("t".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    let plan = build_logical_plan(&bound, &model).expect("plan");
+    let sql = to_sql(&plan).expect("sql");
+    assert!(
+        sql.contains("SUM(AMOUNT)"),
+        "identifier text is preserved: {sql}"
+    );
+
+    #[cfg(feature = "substrait")]
+    to_plan(&plan).expect("the reference must resolve to a scan column");
+}
+
+/// Entity names are not SQL identifiers, so they are matched as written.
+#[test]
+fn entity_names_are_still_matched_exactly() {
+    let yaml = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: Orders
+    source: s.orders
+    fields:
+      - name: Amount
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: amount }]
+metrics:
+  - name: as_declared
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(Orders.Amount)" }]
+  - name: wrong_case
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.Amount)" }]
+"#;
+    let doc = from_yaml_str(yaml).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+
+    assert!(model.metric("as_declared").is_some());
+    assert!(model.metric("wrong_case").is_none());
+    let issue = &model.issues[0];
+    assert!(issue.message.contains("declares \"Orders\""), "{issue:?}");
+}

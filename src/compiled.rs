@@ -51,15 +51,18 @@ impl CompiledDataset {
         self.fields.iter().find(|f| f.name == name)
     }
 
-    /// Physical columns a scan of this dataset exposes, in declaration order,
-    /// deduplicated.
+    /// Physical columns a scan of this dataset exposes, in declaration order.
+    ///
+    /// Deduplicated case-insensitively: two fields spelling the same
+    /// underlying column differently name one column, not two. The first
+    /// spelling is the one exposed.
     pub fn scan_columns(&self) -> Vec<(&str, Option<DataType>)> {
         let mut out: Vec<(&str, Option<DataType>)> = Vec::new();
         for f in &self.fields {
             let Some(col) = f.physical_column.as_deref() else {
                 continue;
             };
-            if out.iter().any(|(name, _)| *name == col) {
+            if out.iter().any(|(name, _)| name.eq_ignore_ascii_case(col)) {
                 continue;
             }
             out.push((col, f.datatype));

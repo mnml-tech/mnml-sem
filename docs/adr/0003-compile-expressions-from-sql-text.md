@@ -45,15 +45,36 @@ Parse the expression text and lower it to the plan IR.
   physical columns of its dataset; a metric's expression resolves
   `dataset.field` through the model to that field's definition. Without the
   split, a field whose expression is `id` would resolve to itself forever.
-- **Identifier text is preserved, and entity names are matched as written.**
-  Whether an unquoted SQL identifier is case-insensitive is a question for the
-  engine running the query, answered against its own catalog; this crate
-  forwards the identifier, and folding its case would change the SQL emitted
-  and could not be undone. A `dataset.field` reference is not a SQL identifier
-  at all — it names a `name` in the document, which the schema constrains in no
-  way — so it is compared to what the document declares. When a reference
-  differs from a declared name only by case, the error says which name was
-  declared, so exact matching is strict without being unhelpful.
+- **Identifier text is preserved; matching is what varies.** The expression
+  language says an unquoted identifier is case-insensitive and that the
+  normalized form used for matching is upper-cased. Normalizing for *matching*
+  is not the same as normalizing for *emission*: folding an identifier's case
+  on the way out rewrites the SQL handed to the engine and cannot be undone. So
+  the text is kept exactly as written, and only the comparisons fold —
+  `amount` and `AMOUNT` name one column, and two fields spelling it differently
+  produce one scan column rather than two.
+- **Entity names are matched as written.** A `dataset.field` reference is not a
+  SQL identifier; it names a `name` in the document, which the schema
+  constrains in no way. The expression language routes how such a reference is
+  looked up to a semantics document that is not published, so there is no rule
+  to follow — and folding both sides would make two entities collide, since a
+  model may legitimately declare `Orders` and `orders` as distinct. When a
+  reference differs from a declared name only by case, the error says which
+  name was declared, so matching as written is strict without being unhelpful.
+- **An expression may reference any dataset; the joins follow from it.** A
+  metric naming `customers.id` causes the binder to find a join path, rather
+  than requiring the query to ask for one. This is what makes
+  [ADR-0011](0011-refuse-a-metric-a-join-would-inflate.md) necessary: a
+  reference is enough to create a join, so a reference is enough to create a
+  fan-out.
+- **A metric may not reference another metric.** The spec anticipates this —
+  its namespace table has a row for metric references — and then defers the
+  rules to the same unpublished semantics document. Simple substitution
+  (`revenue_per_unit = total_revenue / total_units`) would be a small change;
+  what is undecided is how a bare name resolves when a metric and a dataset
+  share it, and what a reference means when the two aggregate at different
+  grains. Until there is a rule, a metric referencing a metric fails as an
+  unresolved reference.
 
 ## Consequences
 
@@ -66,7 +87,11 @@ Parse the expression text and lower it to the plan IR.
   main place this crate can be too strict or too lax.
 - A model can only be compiled for a dialect this crate can parse.
 - A model whose entity names are not lowercase works, and one whose references
-  disagree with its declarations about case does not. The alternative — folding
-  both sides — would make two distinct names collide, since the spec permits a
-  model to declare both `Orders` and `orders`.
+  disagree with its declarations about case does not.
+- Emitted SQL says what the model said. A field written `AMOUNT` is emitted as
+  `AMOUNT`, so a reader can match the output against the model, and an engine
+  with case-sensitive quoted columns is not broken by a normalization we chose.
+- Reuse across metrics is not available. A model repeating
+  `SUM(orders.amount)` in five metrics repeats it five times, and a change has
+  to be made five times.
 

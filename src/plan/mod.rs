@@ -172,13 +172,20 @@ impl LogicalPlan {
 ///
 /// An empty `dataset` matches on column name alone, which is how a
 /// single-source query refers to its columns.
+///
+/// The column is compared case-insensitively: an unquoted SQL identifier names
+/// the same column whatever its case, and the expression language says so. The
+/// dataset is compared exactly — it holds a logical dataset name or a subquery
+/// alias this crate generated, not an identifier someone wrote.
 pub fn find_column(schema: &[SchemaColumn], dataset: &str, column: &str) -> Option<usize> {
     if dataset.is_empty() {
-        return schema.iter().position(|c| c.name == column);
+        return schema
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(column));
     }
     schema
         .iter()
-        .position(|c| c.dataset == dataset && c.name == column)
+        .position(|c| c.dataset == dataset && c.name.eq_ignore_ascii_case(column))
 }
 
 /// A column exposed by a [`LogicalPlan::Scan`].
