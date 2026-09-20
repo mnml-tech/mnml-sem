@@ -1722,3 +1722,247 @@ metrics:
     let issue = &model.issues[0];
     assert!(issue.message.contains("declares \"Orders\""), "{issue:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Metric composition: a metric may reference another by bare name.
+// ---------------------------------------------------------------------------
+
+const COMPOSED: &str = r#"
+version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: orders
+    source: s.orders
+    fields:
+      - name: amount
+        datatype: Decimal
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: amount }]
+      - name: qty
+        datatype: Integer
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: qty }]
+      - name: customer_id
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: customer_id }]
+  - name: customers
+    source: s.customers
+    primary_key: [id]
+    fields:
+      - name: id
+        expression:
+          dialects: [{ dialect: ANSI_SQL, expression: id }]
+relationships:
+  - name: orders_to_customers
+    from: orders
+    to: customers
+    from_columns: [customer_id]
+    to_columns: [id]
+metrics:
+  - name: total_revenue
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }]
+  - name: total_units
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.qty)" }]
+  - name: customer_count
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "COUNT(DISTINCT customers.id)" }]
+  - name: revenue_per_unit
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "total_revenue / total_units" }]
+  - name: revenue_in_thousands
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "total_revenue / 1000" }]
+  - name: revenue_per_customer
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "total_revenue / customer_count" }]
+  - name: doubly_derived
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "revenue_per_unit * 100" }]
+"#;
+
+fn composed_sql(metric: &str) -> String {
+    let doc = from_yaml_str(COMPOSED).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+    assert!(model.issues.is_empty(), "{:?}", model.issues);
+    let spec = SemanticQuery {
+        metrics: vec![metric.to_string()],
+        dataset: Some("orders".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    let plan = build_logical_plan(&bound, &model).expect("plan");
+    #[cfg(feature = "substrait")]
+    to_plan(&plan).expect("substrait");
+    to_sql(&plan).expect("sql")
+}
+
+/// A reference is substituted with what the referenced metric compiled to.
+#[test]
+fn a_metric_may_be_built_from_other_metrics() {
+    let sql = composed_sql("revenue_per_unit");
+    assert!(
+        sql.contains("(SUM(amount) / SUM(qty)) AS revenue_per_unit"),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_metric_may_be_scaled_by_a_constant() {
+    assert!(composed_sql("revenue_in_thousands").contains("(SUM(amount) / 1000)"));
+}
+
+/// Composition is transitive.
+#[test]
+fn a_derived_metric_may_itself_be_referenced() {
+    let sql = composed_sql("doubly_derived");
+    assert!(sql.contains("((SUM(amount) / SUM(qty)) * 100)"), "{sql}");
+}
+
+/// Substitution is closed under the IR, so a reference that reaches another
+/// dataset still pulls in its join.
+#[test]
+fn composition_carries_the_referenced_metrics_datasets() {
+    let sql = composed_sql("revenue_per_customer");
+    assert!(
+        sql.contains("INNER JOIN"),
+        "the join must follow the reference: {sql}"
+    );
+    assert!(
+        sql.contains("(SUM(orders.amount) / COUNT(DISTINCT customers.id))"),
+        "{sql}"
+    );
+}
+
+/// And the composed metric is still split into measures for Substrait.
+#[cfg(feature = "substrait")]
+#[test]
+fn a_composed_metric_still_splits_into_measures() {
+    use substrait::proto::rel::RelType;
+
+    let doc = from_yaml_str(COMPOSED).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+    let spec = SemanticQuery {
+        metrics: vec!["revenue_per_unit".into()],
+        dataset: Some("orders".into()),
+        ..Default::default()
+    };
+    let bound = bind_query(&model, &spec).expect("bind");
+    let plan = build_logical_plan(&bound, &model).expect("plan");
+    let substrait_plan = to_plan(&plan).expect("substrait");
+
+    let substrait::proto::plan_rel::RelType::Root(root) =
+        substrait_plan.relations[0].rel_type.clone().expect("rel")
+    else {
+        panic!("expected a root rel");
+    };
+    let Some(RelType::Project(project)) = root.input.expect("input").rel_type else {
+        panic!("expected a projection over the aggregate");
+    };
+    let Some(RelType::Aggregate(agg)) = project.input.expect("input").rel_type else {
+        panic!("expected an aggregate");
+    };
+    assert_eq!(agg.measures.len(), 2, "SUM(amount) and SUM(qty)");
+}
+
+fn compile_issue(metrics: &str) -> String {
+    let yaml = format!(
+        r#"version: "0.2.0.dev0"
+name: m
+datasets:
+  - name: orders
+    source: s.orders
+    fields:
+      - name: amount
+        expression:
+          dialects: [{{ dialect: ANSI_SQL, expression: amount }}]
+metrics:
+{metrics}"#
+    );
+    let doc = from_yaml_str(&yaml).expect("parse");
+    let model = CompiledModel::compile(&doc).expect("compile");
+    model
+        .issues
+        .iter()
+        .map(|i| format!("{i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_reference_cycle_is_reported_with_its_path() {
+    let issues = compile_issue(
+        r#"  - name: a
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "b + 1" }]
+  - name: b
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "a + 1" }]
+"#,
+    );
+    assert!(issues.contains("cycle"), "{issues}");
+    assert!(
+        issues.contains("a -> b -> a"),
+        "the path should be named: {issues}"
+    );
+}
+
+#[test]
+fn a_metric_cannot_reference_itself() {
+    let issues = compile_issue(
+        r#"  - name: loop
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "loop * 2" }]
+"#,
+    );
+    assert!(issues.contains("cycle"), "{issues}");
+}
+
+/// A metric is already aggregated, so it cannot be wrapped in an aggregate.
+#[test]
+fn a_metric_reference_cannot_sit_inside_an_aggregate() {
+    let issues = compile_issue(
+        r#"  - name: total
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(orders.amount)" }]
+  - name: nested
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(total)" }]
+"#,
+    );
+    assert!(issues.contains("already aggregated"), "{issues}");
+}
+
+/// Whose failure it is should be clear.
+#[test]
+fn depending_on_a_broken_metric_says_so() {
+    let issues = compile_issue(
+        r#"  - name: windowed
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "RANK() OVER (ORDER BY orders.amount)" }]
+  - name: depends_on_it
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "windowed / 2" }]
+"#,
+    );
+    assert!(
+        issues.contains("references metric \"windowed\", which did not compile"),
+        "{issues}"
+    );
+}
+
+#[test]
+fn an_unknown_bare_name_explains_the_two_spellings() {
+    let issues = compile_issue(
+        r#"  - name: oops
+    expression:
+      dialects: [{ dialect: ANSI_SQL, expression: "SUM(amount)" }]
+"#,
+    );
+    assert!(issues.contains("unknown metric"), "{issues}");
+    assert!(
+        issues.contains("dataset.field"),
+        "should say how to write a column: {issues}"
+    );
+}

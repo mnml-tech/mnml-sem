@@ -32,6 +32,23 @@ use crate::model::{Dialect, SemanticModel};
 use crate::plan::expr::{Expr, Literal};
 use crate::resolver::QueryError;
 
+/// Resolves a metric by name to its compiled expression.
+///
+/// Implemented by the compiler, which owns the memo and the cycle detection;
+/// the lowering pass only needs to ask.
+pub trait MetricLookup {
+    fn lookup(&self, name: &str) -> Result<Expr, QueryError>;
+}
+
+/// A lookup for callers with no metrics to resolve against.
+pub struct NoMetrics;
+
+impl MetricLookup for NoMetrics {
+    fn lookup(&self, name: &str) -> Result<Expr, QueryError> {
+        Err(QueryError::UnknownMetricReference(name.to_string()))
+    }
+}
+
 /// Resolution context for one lowering.
 struct Ctx<'a> {
     /// `Some` in metric mode: `dataset.field` resolves through the model.
@@ -41,6 +58,8 @@ struct Ctx<'a> {
     dataset: Option<&'a str>,
     /// Dialect the source text was written in, for nested lowering.
     dialect: Dialect,
+    /// Resolves a bare name in a metric expression.
+    metrics: &'a dyn MetricLookup,
 }
 
 /// The sqlparser dialect to parse an Ossie dialect's text with.
@@ -105,6 +124,7 @@ pub fn lower_field_expression(
         model: None,
         dataset: Some(dataset),
         dialect,
+        metrics: &NoMetrics,
     };
     let expr = lower(&ast, &ctx)?;
     if expr.contains_aggregate() {
@@ -123,12 +143,14 @@ pub fn lower_metric_expression(
     sql: &str,
     dialect: Dialect,
     model: &SemanticModel,
+    metrics: &dyn MetricLookup,
 ) -> Result<Expr, QueryError> {
     let ast = parse(sql, dialect)?;
     let ctx = Ctx {
         model: Some(model),
         dataset: None,
         dialect,
+        metrics,
     };
     let expr = lower(&ast, &ctx)?;
     if !expr.contains_aggregate() {
@@ -184,12 +206,14 @@ fn lower(e: &ast::Expr, ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
 fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
     let names: Vec<String> = parts.iter().map(identifier_text).collect();
     let (dataset, name) = match names.as_slice() {
-        [name] => {
-            let ds = ctx.dataset.ok_or_else(|| {
-                QueryError::InvalidFieldRef(format!("unqualified identifier {name:?}"))
-            })?;
-            (ds.to_string(), name.clone())
-        }
+        [name] => match ctx.dataset {
+            // A field's own definition: a bare name is a physical column.
+            Some(ds) => (ds.to_string(), name.clone()),
+            // A metric: a bare name is another metric, per the schema's
+            // "an unqualified metric reference resolves to a model-scoped
+            // metric".
+            None => return ctx.metrics.lookup(name),
+        },
         [dataset, name] => (dataset.clone(), name.clone()),
         _ => {
             return Err(QueryError::InvalidFieldRef(format!(
@@ -522,7 +546,8 @@ fn lower_function(f: &ast::Function, ctx: &Ctx<'_>) -> Result<Expr, QueryError> 
     if def.is_aggregate() {
         if lowered.iter().any(Expr::contains_aggregate) {
             return Err(QueryError::UnsupportedExpression(format!(
-                "nested aggregate inside {name} is not supported"
+                "nested aggregate inside {name} is not supported; a metric reference is \
+                 already aggregated and cannot be wrapped in another aggregate"
             )));
         }
         return Ok(Expr::Agg {
@@ -674,7 +699,7 @@ datasets:
     /// Round-trip through the formatter: proves the tree is structured, not `Expr::Sql`.
     fn metric_sql(sql: &str) -> String {
         let m = model();
-        let e = lower_metric_expression(sql, Dialect::AnsiSql, &m).expect(sql);
+        let e = lower_metric_expression(sql, Dialect::AnsiSql, &m, &NoMetrics).expect(sql);
         format_expr(
             &e,
             SqlCtx {
@@ -751,6 +776,7 @@ datasets:
             "SUM(orders.amount + orders.qty * orders.qty)",
             Dialect::AnsiSql,
             &m,
+            &NoMetrics,
         )
         .expect("lower");
         let Expr::Agg { args, .. } = &e else {
@@ -809,15 +835,16 @@ datasets:
 
     #[test]
     fn metric_expressions_require_an_aggregate() {
-        let err = lower_metric_expression("orders.amount", Dialect::AnsiSql, &model())
+        let err = lower_metric_expression("orders.amount", Dialect::AnsiSql, &model(), &NoMetrics)
             .expect_err("scalar metric must be rejected");
         assert!(err.to_string().contains("no aggregate"), "{err}");
     }
 
     #[test]
     fn subqueries_are_rejected() {
-        let err = lower_metric_expression("SUM((SELECT 1))", Dialect::AnsiSql, &model())
-            .expect_err("subquery must be rejected");
+        let err =
+            lower_metric_expression("SUM((SELECT 1))", Dialect::AnsiSql, &model(), &NoMetrics)
+                .expect_err("subquery must be rejected");
         assert!(err.to_string().contains("subqueries"), "{err}");
     }
 
@@ -827,6 +854,7 @@ datasets:
             "RANK() OVER (ORDER BY orders.amount DESC)",
             Dialect::AnsiSql,
             &model(),
+            &NoMetrics,
         )
         .expect_err("window function must be rejected");
         assert!(err.to_string().contains("window function"), "{err}");
@@ -834,12 +862,14 @@ datasets:
 
     #[test]
     fn unknown_references_are_errors_not_passthrough() {
-        let err = lower_metric_expression("SUM(orders.nope)", Dialect::AnsiSql, &model())
-            .expect_err("unknown field must be rejected");
+        let err =
+            lower_metric_expression("SUM(orders.nope)", Dialect::AnsiSql, &model(), &NoMetrics)
+                .expect_err("unknown field must be rejected");
         assert!(err.to_string().contains("field not found"), "{err}");
 
-        let err = lower_metric_expression("SUM(nope.amount)", Dialect::AnsiSql, &model())
-            .expect_err("unknown dataset must be rejected");
+        let err =
+            lower_metric_expression("SUM(nope.amount)", Dialect::AnsiSql, &model(), &NoMetrics)
+                .expect_err("unknown dataset must be rejected");
         assert!(err.to_string().contains("dataset not found"), "{err}");
     }
 
@@ -849,6 +879,7 @@ datasets:
             "SUM(REGEXP_EXTRACT(orders.amount, 'x'))",
             Dialect::AnsiSql,
             &model(),
+            &NoMetrics,
         )
         .expect_err("a function with no catalog row must be rejected");
         assert!(err.to_string().contains("REGEXP_EXTRACT"), "{err}");
@@ -868,8 +899,13 @@ datasets:
 
     #[test]
     fn arity_is_enforced_from_the_catalog() {
-        let err = lower_metric_expression("SUM(NULLIF(orders.amount))", Dialect::AnsiSql, &model())
-            .expect_err("NULLIF takes two arguments");
+        let err = lower_metric_expression(
+            "SUM(NULLIF(orders.amount))",
+            Dialect::AnsiSql,
+            &model(),
+            &NoMetrics,
+        )
+        .expect_err("NULLIF takes two arguments");
         assert!(err.to_string().contains("does not take 1"), "{err}");
     }
 
@@ -972,7 +1008,7 @@ datasets:
           dialects: [{ dialect: ANSI_SQL, expression: Amount }]
 "#;
         let model = from_yaml_str(yaml).expect("parse").model;
-        let e = lower_metric_expression("SUM(Orders.Amount)", Dialect::AnsiSql, &model)
+        let e = lower_metric_expression("SUM(Orders.Amount)", Dialect::AnsiSql, &model, &NoMetrics)
             .expect("a mixed-case reference must resolve");
         assert!(matches!(&e, Expr::Agg { .. }), "{e:?}");
     }
@@ -993,20 +1029,23 @@ datasets:
 "#;
         let model = from_yaml_str(yaml).expect("parse").model;
 
-        let err = lower_metric_expression("SUM(orders.Amount)", Dialect::AnsiSql, &model)
-            .expect_err("the dataset is declared as Orders");
+        let err =
+            lower_metric_expression("SUM(orders.Amount)", Dialect::AnsiSql, &model, &NoMetrics)
+                .expect_err("the dataset is declared as Orders");
         assert!(err.to_string().contains("declares \"Orders\""), "{err}");
 
-        let err = lower_metric_expression("SUM(Orders.amount)", Dialect::AnsiSql, &model)
-            .expect_err("the field is declared as Amount");
+        let err =
+            lower_metric_expression("SUM(Orders.amount)", Dialect::AnsiSql, &model, &NoMetrics)
+                .expect_err("the field is declared as Amount");
         assert!(err.to_string().contains("declares \"Amount\""), "{err}");
     }
 
     /// No suggestion when there is nothing close, and none that is ambiguous.
     #[test]
     fn a_missing_name_suggests_nothing() {
-        let err = lower_metric_expression("SUM(orders.nope)", Dialect::AnsiSql, &model())
-            .expect_err("no such field");
+        let err =
+            lower_metric_expression("SUM(orders.nope)", Dialect::AnsiSql, &model(), &NoMetrics)
+                .expect_err("no such field");
         assert!(err.to_string().contains("nope"), "{err}");
         assert!(!err.to_string().contains("declares"), "{err}");
     }

@@ -15,6 +15,18 @@ pub enum QueryError {
     #[error("metric not found: {0:?}")]
     MetricNotFound(String),
 
+    #[error(
+        "unknown metric {0:?}; an unqualified name in a metric expression names another \
+         metric, and a column is written `dataset.field`"
+    )]
+    UnknownMetricReference(String),
+
+    #[error("metric reference cycle: {path}")]
+    MetricCycle { path: String },
+
+    #[error("references metric {metric:?}, which did not compile: {reason}")]
+    MetricReferenceFailed { metric: String, reason: String },
+
     /// A reference differs from a declared name only by case. Names in a
     /// document are strings, matched as written.
     #[error("{kind} {wanted:?} not found; the model declares {declared:?}")]

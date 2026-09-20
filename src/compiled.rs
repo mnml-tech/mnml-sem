@@ -18,12 +18,14 @@
 //! quotes the original reason; [`CompiledModel::compile_strict`] refuses any
 //! model with issues, for callers that want that.
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::error::Error;
-use crate::model::{DataType, Dataset, Field, Metric, OssieDocument, Relationship, SemanticModel};
-use crate::plan::ossie_sql;
+use crate::model::{DataType, Dataset, Field, OssieDocument, Relationship, SemanticModel};
+use crate::plan::ossie_sql::{self, MetricLookup};
 use crate::plan::{Expr, pick_expression_dialect};
+use crate::resolver::QueryError;
 
 /// A field with its expression already lowered.
 #[derive(Debug, Clone)]
@@ -172,13 +174,25 @@ impl CompiledModel {
             .map(|ds| compile_dataset(ds, &mut issues))
             .collect();
 
-        // Metrics resolve `dataset.field` through the model, so they need the
-        // raw model rather than the partially compiled one.
-        let metrics: Vec<CompiledMetric> = model
-            .metrics
-            .iter()
-            .filter_map(|m| compile_metric(m, model, &mut issues))
-            .collect();
+        // A metric may reference another, so they resolve through a shared
+        // resolver that compiles each once and catches cycles, rather than
+        // being compiled independently.
+        let resolver = MetricResolver::new(model);
+        let mut metrics: Vec<CompiledMetric> = Vec::new();
+        for m in &model.metrics {
+            match resolver.resolve(&m.name) {
+                Ok(expr) => metrics.push(CompiledMetric {
+                    name: m.name.clone(),
+                    datatype: m.datatype,
+                    datasets: expr.referenced_datasets(),
+                    expr,
+                }),
+                Err(e) => issues.push(CompileIssue {
+                    target: IssueTarget::metric(&m.name),
+                    message: e.to_string(),
+                }),
+            }
+        }
 
         Ok(Self {
             name: model.name.clone(),
@@ -200,6 +214,75 @@ impl CompiledModel {
 
     pub fn metric(&self, name: &str) -> Option<&CompiledMetric> {
         self.metrics.iter().find(|m| m.name == name)
+    }
+}
+
+/// Compiles metrics on demand, so a metric that references another is
+/// resolved by substituting what that one compiled to.
+///
+/// Substitution is closed under the expression IR — aggregates stay at the
+/// leaves — so nothing downstream needs to know a reference was involved.
+struct MetricResolver<'a> {
+    model: &'a SemanticModel,
+    compiled: RefCell<HashMap<String, Expr>>,
+    /// Names currently being resolved, innermost last. A name already here is
+    /// a cycle, and the stack is the path to report.
+    in_progress: RefCell<Vec<String>>,
+}
+
+impl<'a> MetricResolver<'a> {
+    fn new(model: &'a SemanticModel) -> Self {
+        Self {
+            model,
+            compiled: RefCell::new(HashMap::new()),
+            in_progress: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn resolve(&self, name: &str) -> Result<Expr, QueryError> {
+        if let Some(done) = self.compiled.borrow().get(name) {
+            return Ok(done.clone());
+        }
+        if let Some(at) = self.in_progress.borrow().iter().position(|n| n == name) {
+            let mut path = self.in_progress.borrow()[at..].join(" -> ");
+            path.push_str(" -> ");
+            path.push_str(name);
+            return Err(QueryError::MetricCycle { path });
+        }
+
+        let metric = self
+            .model
+            .metrics
+            .iter()
+            .find(|m| m.name == name)
+            .ok_or_else(|| QueryError::UnknownMetricReference(name.to_string()))?;
+        let (dialect, sql) =
+            pick_expression_dialect(&metric.expression).ok_or(QueryError::MissingExpressionSql)?;
+
+        self.in_progress.borrow_mut().push(name.to_string());
+        let lowered = ossie_sql::lower_metric_expression(&sql, dialect, self.model, self);
+        self.in_progress.borrow_mut().pop();
+
+        let expr = lowered?;
+        self.compiled
+            .borrow_mut()
+            .insert(name.to_string(), expr.clone());
+        Ok(expr)
+    }
+}
+
+impl MetricLookup for MetricResolver<'_> {
+    fn lookup(&self, name: &str) -> Result<Expr, QueryError> {
+        self.resolve(name).map_err(|e| match e {
+            // A cycle is about the chain, not about this one reference.
+            cycle @ QueryError::MetricCycle { .. } => cycle,
+            // Otherwise say whose failure this is, rather than repeating
+            // another metric's error as if it were this metric's own.
+            other => QueryError::MetricReferenceFailed {
+                metric: name.to_string(),
+                reason: other.to_string(),
+            },
+        })
     }
 }
 
@@ -252,39 +335,5 @@ fn compile_field(
         is_time: field.is_time_dimension(),
         expr,
         physical_column,
-    })
-}
-
-fn compile_metric(
-    metric: &Metric,
-    model: &SemanticModel,
-    issues: &mut Vec<CompileIssue>,
-) -> Option<CompiledMetric> {
-    let target = IssueTarget::metric(&metric.name);
-    let (dialect, sql) = match pick_expression_dialect(&metric.expression) {
-        Some(picked) => picked,
-        None => {
-            issues.push(CompileIssue {
-                target,
-                message: "no usable dialect entry".to_string(),
-            });
-            return None;
-        }
-    };
-    let expr = match ossie_sql::lower_metric_expression(&sql, dialect, model) {
-        Ok(expr) => expr,
-        Err(e) => {
-            issues.push(CompileIssue {
-                target,
-                message: e.to_string(),
-            });
-            return None;
-        }
-    };
-    Some(CompiledMetric {
-        name: metric.name.clone(),
-        datatype: metric.datatype,
-        datasets: expr.referenced_datasets(),
-        expr,
     })
 }

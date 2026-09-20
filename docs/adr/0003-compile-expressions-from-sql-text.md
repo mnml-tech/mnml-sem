@@ -73,14 +73,25 @@ Parse the expression text and lower it to the plan IR.
   [ADR-0011](0011-refuse-a-metric-a-join-would-inflate.md) necessary: a
   reference is enough to create a join, so a reference is enough to create a
   fan-out.
-- **A metric may not reference another metric.** The spec anticipates this —
-  its namespace table has a row for metric references — and then defers the
-  rules to the same unpublished semantics document. Simple substitution
-  (`revenue_per_unit = total_revenue / total_units`) would be a small change;
-  what is undecided is how a bare name resolves when a metric and a dataset
-  share it, and what a reference means when the two aggregate at different
-  grains. Until there is a rule, a metric referencing a metric fails as an
-  unresolved reference.
+- **A metric may reference another metric, by bare name.** `revenue_per_unit:
+  total_revenue / total_units`. The reference resolves by substituting what
+  the referenced metric compiled to, which is closed under the IR — aggregates
+  stay at the leaves — so join discovery, the fan-out check, the Substrait
+  measure split and SQL emission are unaffected by a reference having been
+  involved. A reference inside an aggregate is an error, because a metric is
+  already aggregated. Cycles are an error naming the path.
+
+  The spelling is the one the spec gives: an unqualified metric reference
+  resolves to a model-scoped metric. Whether such a reference may appear inside
+  an expression at all is not stated — the namespace rules are deferred to a
+  semantics document that is not published — so this is the natural reading of
+  an undefined area rather than an implementation of a stated one. Unlike the
+  question in [ADR-0013](0013-cross-grain-metric-semantics.md), there is only
+  one reading: if `total_profit / total_revenue` means anything, it means the
+  ratio of those two quantities at the query's grain.
+
+  Re-aggregating a metric (`AVG(some_metric)`) is a different feature needing
+  grain, and is refused by the same rule that refuses nesting.
 
 ## Consequences
 
@@ -102,7 +113,10 @@ Parse the expression text and lower it to the plan IR.
   BigQuery is the target and the vendor entry was written to say something the
   portable one cannot. The plan IR is dialect-neutral, so this is usually
   invisible; where it is not, there is currently no way to ask.
-- Reuse across metrics is not available. A model repeating
-  `SUM(orders.amount)` in five metrics repeats it five times, and a change has
-  to be made five times.
+- A bare name in a metric expression is a metric reference and nothing else.
+  A column written without its dataset is an error naming both spellings,
+  rather than being silently resolved against some default.
+- Only model-scoped metrics exist here. Were dataset-scoped metrics to be
+  added, a bare name inside one of those would mean a column of its source
+  rather than a metric — a second rule alongside this one, not a change to it.
 
