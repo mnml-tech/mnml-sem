@@ -173,7 +173,15 @@ fn removed_root_dialects_and_vendors_are_rejected() {
 
 #[test]
 fn newly_added_dialects_parse() {
-    for dialect in ["MAQL", "BIGQUERY", "SIGMA", "THOUGHTSPOT", "DAX"] {
+    for dialect in [
+        "MAQL",
+        "BIGQUERY",
+        "SIGMA",
+        "THOUGHTSPOT",
+        "DAX",
+        "HOLISTICS_AQL",
+        "OSSIE_SQL_2026",
+    ] {
         let yaml = format!(
             "version: \"{OSSIE_SPEC_VERSION}\"\nname: m\ndatasets:\n  - name: d\n    source: s\n    fields:\n      - name: f\n        expression:\n          dialects:\n            - dialect: {dialect}\n              expression: f\n"
         );

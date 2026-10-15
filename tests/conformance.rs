@@ -140,6 +140,8 @@ fn dialect_enum_matches_the_schema() {
         Dialect::Sigma,
         Dialect::ThoughtSpot,
         Dialect::Dax,
+        Dialect::HolisticsAql,
+        Dialect::OssieSql2026,
     ]
     .iter()
     .map(|d| {

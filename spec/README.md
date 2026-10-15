@@ -9,8 +9,8 @@ as a surprise.
 | | |
 |---|---|
 | Source | <https://github.com/apache/ossie/blob/main/core-spec/ossie-schema.json> |
-| Upstream commit | `cc919e9e3818f5e0b798aa081345630d5af57b64` |
-| Committed upstream | 2026-09-16 (*Define one semantic model per document without a wrapper*, #383) |
+| Upstream commit | `32c293c79a80b0c11e01bd76357950284aeaf3f8` |
+| Committed upstream | 2026-10-13 (*Require a column in primary_key and in each unique key*, #574) |
 | Spec version | `0.2.0.dev0` |
 | Licence | Apache-2.0, © the Apache Software Foundation |
 

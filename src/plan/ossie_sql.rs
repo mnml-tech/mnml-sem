@@ -64,9 +64,10 @@ struct Ctx<'a> {
 
 /// The sqlparser dialect to parse an Ossie dialect's text with.
 ///
-/// The four SQL dialects in the Ossie enum all have a sqlparser counterpart.
-/// The rest (`MDX`, `TABLEAU`, `MAQL`, `SIGMA`, `THOUGHTSPOT`, `DAX`) are not
-/// SQL and cannot be parsed here.
+/// The four vendor SQL dialects in the Ossie enum all have a sqlparser
+/// counterpart. `MDX`, `TABLEAU`, `MAQL`, `SIGMA`, `THOUGHTSPOT`, `DAX` and
+/// `HOLISTICS_AQL` are not SQL and cannot be parsed here. `OSSIE_SQL_2026` is
+/// SQL, but which parser its grammar maps onto is not decided yet.
 fn sqlparser_dialect(dialect: Dialect) -> Result<Box<dyn SqlParserDialect>, QueryError> {
     Ok(match dialect {
         Dialect::AnsiSql => Box::new(AnsiDialect {}),
@@ -79,10 +80,16 @@ fn sqlparser_dialect(dialect: Dialect) -> Result<Box<dyn SqlParserDialect>, Quer
         | Dialect::Maql
         | Dialect::Sigma
         | Dialect::ThoughtSpot
-        | Dialect::Dax => {
+        | Dialect::Dax
+        | Dialect::HolisticsAql => {
             return Err(QueryError::UnsupportedExpression(format!(
                 "dialect {dialect:?} is not a SQL dialect and cannot be compiled"
             )));
+        }
+        Dialect::OssieSql2026 => {
+            return Err(QueryError::UnsupportedExpression(
+                "dialect OSSIE_SQL_2026 cannot be compiled yet".into(),
+            ));
         }
     })
 }

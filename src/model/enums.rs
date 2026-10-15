@@ -22,6 +22,12 @@ pub enum Dialect {
     #[serde(rename = "THOUGHTSPOT")]
     ThoughtSpot,
     Dax,
+    /// Holistics AML Query Language. Wire form is `HOLISTICS_AQL`.
+    HolisticsAql,
+    /// The portable expression language `core-spec/expression_language.md`
+    /// defines. Wire form is `OSSIE_SQL_2026`, not `OSSIE_SQL2026`.
+    #[serde(rename = "OSSIE_SQL_2026")]
+    OssieSql2026,
 }
 
 /// Logical value type of a field or metric (`$defs.DataType`).
@@ -74,6 +80,8 @@ mod tests {
             (Dialect::Sigma, "SIGMA"),
             (Dialect::ThoughtSpot, "THOUGHTSPOT"),
             (Dialect::Dax, "DAX"),
+            (Dialect::HolisticsAql, "HOLISTICS_AQL"),
+            (Dialect::OssieSql2026, "OSSIE_SQL_2026"),
         ] {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, format!("\"{wire}\""), "{variant:?}");
