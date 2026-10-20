@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Foreign key relationship between logical datasets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Relationship {
     pub name: String,

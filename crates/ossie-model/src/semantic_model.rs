@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level container representing a complete semantic model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct SemanticModel {
     pub name: String,

@@ -21,6 +21,8 @@ The repository is a Cargo workspace ([ADR-0015](docs/adr/0015-a-workspace-of-cra
 | [`ossie-substrait`](crates/ossie-substrait) | `LogicalPlan` → Substrait | `ossie-compiler`, `substrait` |
 | [`ossie-ontology`](crates/ossie-ontology) | Checks a mapping against its ontology and semantic model | `ossie-model`, `ossie-compiler` |
 
+For web clients, [`@mnml-tech/sem`](packages/sem) has TypeScript types for all three documents, generated from `ossie-model`'s Rust types ([ADR-0016](docs/adr/0016-typescript-types-generated-from-rust.md)).
+
 - **Spec-aligned** — Types follow the core, ontology and mapping schemas, and the conformance tests check them against vendored copies ([`spec/`](crates/ossie-model/spec/)), so upstream drift shows up as a failing test.
 - **Join-aware binding** — Relationships drive join paths; `dataset.field` references resolve through the model.
 - **Engine-agnostic execution** — Substrait decouples the semantic layer from any one runtime.
@@ -87,6 +89,8 @@ format requires, and where the obvious implementation would be wrong.
 ```sh
 cargo test --workspace
 ```
+
+TypeScript: [`packages/sem`](packages/sem) is generated. After changing a document type, regenerate it with `UPDATE_BINDINGS=1 cargo test -p ossie-model --features ts --test typescript` (the same command without the variable fails while it is stale), then `npm install && npm run typecheck` in `packages/sem` checks every fixture against the types.
 
 Conformance: [`spec/README.md`](crates/ossie-model/spec/README.md) explains how to refresh the vendored Ossie schema; the tests then report exactly what moved.
 

@@ -24,3 +24,4 @@ is current.
 | [0013](0013-cross-grain-metric-semantics.md) | Cross-grain metric semantics | **Proposed** |
 | [0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md) | Dataset-scoped metrics, ahead of the schema | Accepted |
 | [0015](0015-a-workspace-of-crates.md) | A workspace of crates, covering the ontology | Accepted |
+| [0016](0016-typescript-types-generated-from-rust.md) | TypeScript types, generated from the Rust types | Accepted |

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Quantitative measure defined on business data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Metric {
     pub name: String,

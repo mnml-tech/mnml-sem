@@ -15,9 +15,19 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+ts-rs = { workspace = true, optional = true }
+
+[features]
+# Derive TypeScript types for every document type. Only the drift test in
+# tests/typescript.rs uses it; the TypeScript package is committed output.
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 # Conformance tests only: the vendored Ossie schema is checked against this
 # crate's types and fixtures. The library itself does not validate with it —
 # the serde model types are the runtime contract.
 jsonschema.workspace = true
+
+[[test]]
+name = "typescript"
+required-features = ["ts"]

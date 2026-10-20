@@ -22,6 +22,8 @@ substrait = { version = "0.63", features = ["serde"] }
 prost = "0.14"
 thiserror = "2"
 jsonschema = "0.56"
+# The TypeScript package's types are generated from ossie-model's (packages/sem).
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 # Test-only: a real Substrait consumer executes the plans ossie-substrait emits.
 datafusion = "54"
 datafusion-substrait = "54"

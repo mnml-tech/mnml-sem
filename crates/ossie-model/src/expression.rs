@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Expression in a specific dialect.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct DialectExpression {
     pub dialect: Dialect,
@@ -30,6 +31,7 @@ impl DialectExpression {
 
 /// Expression definition with multi-dialect support (at least one dialect per schema).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Expression {
     pub dialects: Vec<DialectExpression>,

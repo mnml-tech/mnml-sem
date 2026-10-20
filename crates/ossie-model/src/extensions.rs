@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// This crate carries extensions through parse and serialization but does not
 /// interpret any of them — nothing outside the Ossie core spec affects planning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct CustomExtension {
     pub vendor_name: String,

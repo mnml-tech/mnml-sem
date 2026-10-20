@@ -19,6 +19,7 @@ pub const OSSIE_SPEC_VERSION: &str = "0.2.0.dev0";
 /// [`SemanticModel`] shape is unchanged and is still what an ontology map embeds
 /// under its own `semantic_model` property, so it stays a distinct type here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(as = "DocumentWire"))]
 #[serde(from = "DocumentWire", into = "DocumentWire")]
 pub struct OssieDocument {
     /// Ossie specification version (schema const [`OSSIE_SPEC_VERSION`]).
@@ -33,7 +34,10 @@ pub struct OssieDocument {
 /// a located error; `#[serde(flatten)]` would drop the field list and position
 /// from the message. Adding a field to [`SemanticModel`] without adding it here
 /// is a compile error in the conversions below.
+///
+/// It is also the TypeScript `OssieDocument`, since it is what is on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "OssieDocument"))]
 #[serde(deny_unknown_fields)]
 struct DocumentWire {
     version: String,

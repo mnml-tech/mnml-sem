@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Dimension metadata on a field (`$defs.Dimension`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct FieldDimension {
     /// Temporal-**role** marker, independent of the field's data type.
@@ -20,6 +21,7 @@ pub struct FieldDimension {
 
 /// Row-level attribute for grouping, filtering, and metric expressions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Field {
     pub name: String,

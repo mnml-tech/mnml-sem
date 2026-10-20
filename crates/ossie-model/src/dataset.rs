@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Logical dataset (fact or dimension table).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Dataset {
     pub name: String,

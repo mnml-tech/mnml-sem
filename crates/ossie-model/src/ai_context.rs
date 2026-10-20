@@ -8,6 +8,7 @@ use serde_json::Value as JsonValue;
 /// The object form allows `instructions`, `synonyms`, `examples`, and any other keys
 /// (JSON Schema `additionalProperties: true` on the object branch).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(untagged)]
 pub enum AiContext {
     Text(String),
@@ -16,6 +17,7 @@ pub enum AiContext {
 
 /// Structured AI context with known fields plus arbitrary extension properties.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AiContextStructured {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,

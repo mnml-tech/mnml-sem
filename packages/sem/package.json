@@ -1,0 +1,29 @@
+{
+  "name": "@mnml-tech/sem",
+  "version": "0.1.0",
+  "description": "TypeScript types for Apache Ossie semantic models, ontologies and mappings, generated from mnml-sem's Rust types.",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mnml-tech/mnml-sem.git",
+    "directory": "packages/sem"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

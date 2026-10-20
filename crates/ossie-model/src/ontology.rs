@@ -31,6 +31,7 @@ pub const ANY: &str = "Any";
 
 /// Root of an ontology document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct OntologyDocument {
     pub version: String,
@@ -64,6 +65,7 @@ impl OntologyDocument {
 /// One concept, with the relationships in which it plays the first role
 /// (`$defs.OntologyComponent`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct OntologyComponent {
     pub concept: String,
@@ -97,6 +99,7 @@ impl OntologyComponent {
 
 /// Entity type or value type (`$defs.ConceptType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum ConceptType {
     /// A real-world concept, referenced through other information.
     EntityType,
@@ -109,6 +112,8 @@ pub enum ConceptType {
 /// Its first role is played by the concept it is declared under; `roles` lists
 /// the rest, in order. It is identified as `Concept.name`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+// Renamed so it does not collide with the semantic model's `Relationship`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "OntologyRelationship"))]
 #[serde(deny_unknown_fields)]
 pub struct Relationship {
     pub name: String,
@@ -137,6 +142,7 @@ impl Relationship {
 
 /// A role after the first (`$defs.Role`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Role {
     pub concept: String,
@@ -154,6 +160,7 @@ impl Role {
 
 /// Relationship multiplicity (`$defs.Multiplicity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum Multiplicity {
     /// The last role is determined by the others.
     ManyToOne,
@@ -164,6 +171,7 @@ pub enum Multiplicity {
 /// How one concept, and the relationships grouped under it, are populated
 /// (`$defs.ConceptMapping`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct ConceptMapping {
     pub concept: String,
@@ -177,6 +185,7 @@ pub struct ConceptMapping {
 
 /// Expressions that find objects of a concept (`$defs.ObjectMapping`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct ObjectMapping {
     /// The concept mapped to; otherwise implied by where the mapping sits.
@@ -193,6 +202,7 @@ pub struct ObjectMapping {
 /// One identifying relationship of a referenced entity
 /// (`$defs.ReferentMapping`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct ReferentMapping {
     pub relationship: String,
@@ -208,6 +218,7 @@ pub struct ReferentMapping {
 /// A node at depth `n` maps tuples of `n` objects: its ancestors' objects, then
 /// its own. When it names a relationship, that relationship has `n` roles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct LinkMapping {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -220,6 +231,7 @@ pub struct LinkMapping {
 
 /// A mapping embedded in an ontology (`$defs.OntologyMap`). Deprecated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct OntologyMap {
     #[serde(default, skip_serializing_if = "Option::is_none")]

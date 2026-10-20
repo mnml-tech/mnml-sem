@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Mirrors the closed enum in `core-spec/ossie-schema.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Dialect {
     AnsiSql,
@@ -36,6 +37,7 @@ pub enum Dialect {
 /// Omit when the type is unknown; use [`DataType::Opaque`] for a known type
 /// outside this vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub enum DataType {
     String,
     Integer,

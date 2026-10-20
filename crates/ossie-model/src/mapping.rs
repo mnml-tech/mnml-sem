@@ -14,6 +14,7 @@ pub const MAPPING_SPEC_VERSION: &str = "0.2.0.dev0";
 
 /// Root of a mapping document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct MappingDocument {
     pub version: String,
@@ -31,6 +32,7 @@ pub struct MappingDocument {
 
 /// Another document, by name (`$defs.DocumentReference`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct DocumentReference {
     /// Must equal the referenced document's own `name`.
