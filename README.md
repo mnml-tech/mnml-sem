@@ -1,12 +1,12 @@
-# ossie-substrait
+# mnml-sem
 
-> Compile [Apache Ossie](https://github.com/apache/ossie) semantic models into **Substrait** plans — portable IR for DataFusion, Velox, and other Substrait-capable engines.
+> A compiler for [Apache Ossie](https://github.com/apache/ossie) semantic models: compile them into **Substrait** plans — portable IR for DataFusion, Velox, and other Substrait-capable engines — or SQL.
 >
 > Targets core-spec **`0.2.0.dev0`**. Ossie was previously named Open Semantic Interchange (OSI).
 
 ## What is this?
 
-**ossie-substrait** implements the path **Ossie document → validated model → bound query → logical plan → Substrait**. Load YAML/JSON, resolve a SemanticQuery against the document's model and compile an open **Substrait** plan.
+**mnml-sem** implements the path **Ossie document → validated model → bound query → logical plan → Substrait**. Load YAML/JSON, resolve a SemanticQuery against the document's model and compile an open **Substrait** plan.
 
 It also emits **ANSI-style SQL** via [`emit::sql::to_sql`](crates/ossie-compiler/src/emit/sql.rs) — derived from the same structured plan (debugging, legacy engines).
 
@@ -89,6 +89,12 @@ cargo test --workspace
 Conformance: [`spec/README.md`](crates/ossie-model/spec/README.md) explains how to refresh the vendored Ossie schema; the tests then report exactly what moved.
 
 Fixtures: [`crates/ossie-model/tests/fixtures/`](crates/ossie-model/tests/fixtures/), shared by every crate's tests. The end-to-end tests (parse → plan → SQL and Substrait) live in [`crates/ossie-substrait/tests/`](crates/ossie-substrait/tests/). Among them, [`datafusion.rs`](crates/ossie-substrait/tests/datafusion.rs) has [DataFusion](https://datafusion.apache.org) (a dev-dependency only) execute both the emitted Substrait plan and the emitted SQL against in-memory tables, and checks they return the same rows. The TPC-DS example test is **`#[ignore]`** unless you clone [Ossie](https://github.com/apache/ossie) next to this repo (`../ossie/examples/…`); then `cargo test --workspace -- --include-ignored`.
+
+## Trademarks
+
+Apache Ossie, Ossie, Apache, and the Apache feather logo are trademarks of The
+Apache Software Foundation. mnml-sem is not affiliated with or endorsed by the
+ASF.
 
 ## License
 

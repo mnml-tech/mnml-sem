@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-repository = "https://github.com/mnml-tech/ossie-substrait"
+repository = "https://github.com/mnml-tech/mnml-sem"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]

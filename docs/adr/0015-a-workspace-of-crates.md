@@ -96,11 +96,13 @@ on those above it:
   tests pass before and after. `ossie-ontology` and the ontology types follow
   in later changes; the crate is created with its first code.
 
-**The crate names are the ones above.** The repository's name is a separate
-question this record leaves open: `osi-substrait` still carries the pre-rename
-OSI, and both it and the README's "compile Ossie to Substrait" describe one
-crate rather than the project. Nothing is published, so renaming is free now
-and costly later.
+**The crate names are the ones above, for now.** The repository is renamed
+`mnml-sem`, from `osi-substrait`, which carried the pre-rename OSI and
+described one crate rather than the project. The ASF's trademark policy does
+not allow a project's name in a third party's product branding, so the
+`ossie-` prefix is settled before anything is published: either upstream
+approves it, or the crates take the repository's prefix. Nothing is published,
+so renaming is free now and costly later.
 
 ## Consequences
 
