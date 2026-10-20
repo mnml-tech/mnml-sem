@@ -136,9 +136,9 @@ impl Block {
                     return Err(EmitError::InvalidPlan("join with no keys"));
                 }
                 let (left_sql, mut schema) =
-                    Block::build(left, dialect, aliases)?.into_source(dialect, aliases);
+                    Block::build(left, dialect, aliases)?.into_join_side(false, dialect, aliases);
                 let (right_sql, right_schema) =
-                    Block::build(right, dialect, aliases)?.into_source(dialect, aliases);
+                    Block::build(right, dialect, aliases)?.into_join_side(true, dialect, aliases);
                 schema.extend(right_schema);
 
                 let mut block = Block::source(String::new(), true, schema);
@@ -318,6 +318,28 @@ impl Block {
                 .collect());
         }
         Ok(exprs.into_iter().cloned().collect())
+    }
+
+    /// Reduce to one side of a join. A bare join chain needs no subquery: on
+    /// the left it continues the chain (`a JOIN b ON … JOIN c ON …`), and on
+    /// the right it is parenthesised. Either way its tables keep their own
+    /// names, which the nodes above refer to. Wrapping it in a subquery would
+    /// hide those names behind an alias that nothing above uses.
+    fn into_join_side(
+        self,
+        right: bool,
+        dialect: &dyn SqlDialect,
+        aliases: &mut Aliases,
+    ) -> (String, Vec<SchemaColumn>) {
+        if self.occupied() == Clause::From && self.multi_source {
+            let from = if right {
+                format!("({})", self.from)
+            } else {
+                self.from
+            };
+            return (from, self.schema);
+        }
+        self.into_source(dialect, aliases)
     }
 
     /// Reduce to something usable in a `FROM`: a bare source when nothing but
@@ -616,6 +638,38 @@ mod tests {
         // The join key follows the wrapped side behind its alias.
         assert!(sql.contains("ON sales.store_id = t0.id"), "{sql}");
         assert!(sql.contains("SUM(sales.amount) AS total"), "{sql}");
+    }
+
+    /// Three datasets join as one chain. Wrapping the first join in a
+    /// subquery would hide `b` behind an alias while the select list still
+    /// names `b.y`.
+    #[test]
+    fn a_join_chain_stays_flat() {
+        let key = |l: &str, lc: &str, r: &str, rc: &str| crate::plan::JoinKey {
+            left_dataset: l.into(),
+            left_column: lc.into(),
+            right_dataset: r.into(),
+            right_column: rc.into(),
+        };
+        let plan = LogicalPlan::Aggregate {
+            input: Box::new(LogicalPlan::Join {
+                left: Box::new(LogicalPlan::Join {
+                    left: Box::new(scan("a", "s.a", &["b_id", "c_id"])),
+                    right: Box::new(scan("b", "s.b", &["id", "y"])),
+                    on: vec![key("a", "b_id", "b", "id")],
+                }),
+                right: Box::new(scan("c", "s.c", &["id", "z"])),
+                on: vec![key("a", "c_id", "c", "id")],
+            }),
+            group_by: vec![Expr::column("b", "y"), Expr::column("c", "z")],
+            aggregates: vec![count("n")],
+        };
+        let sql = to_sql(&plan).expect("sql");
+        assert_eq!(
+            sql,
+            "SELECT b.y, c.z, COUNT(*) AS n FROM s.a INNER JOIN s.b ON a.b_id = b.id \
+             INNER JOIN s.c ON a.c_id = c.id GROUP BY b.y, c.z"
+        );
     }
 
     #[test]

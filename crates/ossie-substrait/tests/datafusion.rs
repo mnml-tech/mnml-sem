@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+use datafusion::arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray,
+};
 use datafusion::arrow::datatypes::{Field, Schema};
 use datafusion::arrow::util::display::array_value_to_string;
 use datafusion::catalog::{MemoryCatalogProvider, MemorySchemaProvider};
@@ -152,6 +154,10 @@ fn register(ctx: &SessionContext, source: &str, columns: Vec<(&str, ArrayRef)>) 
         }
     }
     ctx.register_table(source, table).expect("register table");
+}
+
+fn bools(values: &[bool]) -> ArrayRef {
+    Arc::new(BooleanArray::from(values.to_vec()))
 }
 
 fn strings(values: &[&str]) -> ArrayRef {
@@ -452,7 +458,7 @@ async fn a_model_metric_built_on_dataset_metrics_executes() {
 }
 
 // ---------------------------------------------------------------------------
-// Steel Wheels: untyped fields, a fact with two dimensions.
+// Steel Wheels: a fact with two dimensions, every field typed.
 // ---------------------------------------------------------------------------
 
 const STEELWHEELS: &str = include_str!("../../ossie-model/tests/fixtures/steelwheels.yaml");
@@ -468,7 +474,7 @@ fn steelwheels() -> SessionContext {
             ("quantityordered", ints(&[2, 1, 4, 5])),
             ("totalprice", floats(&[200.0, 50.0, 480.0, 100.0])),
             ("priceeach", floats(&[100.0, 50.0, 120.0, 20.0])),
-            ("is_premium_order", strings(&["N", "N", "Y", "N"])),
+            ("is_premium_order", bools(&[false, false, true, false])),
             (
                 "order_status",
                 strings(&["Shipped", "Shipped", "Shipped", "Cancelled"]),
@@ -499,23 +505,136 @@ fn steelwheels() -> SessionContext {
     ctx
 }
 
+fn steelwheels_plan(query: SemanticQuery) -> LogicalPlan {
+    plan(
+        STEELWHEELS,
+        &SemanticQuery {
+            dataset: Some("orderfact".into()),
+            ..query
+        },
+    )
+}
+
+#[tokio::test]
+async fn steelwheels_sales_by_year_executes() {
+    let plan = steelwheels_plan(SemanticQuery {
+        group_by: vec!["dates.year_id".into()],
+        metrics: vec!["sales".into(), "quantity".into()],
+        order_by: vec![OrderBy::asc("dates.year_id")],
+        ..Default::default()
+    });
+    assert_rows(
+        &steelwheels(),
+        &plan,
+        &["2024 | 730.0 | 7", "2025 | 100.0 | 5"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn steelwheels_joins_both_dimensions() {
+    let plan = steelwheels_plan(SemanticQuery {
+        group_by: vec!["dates.year_id".into(), "customer_w_ter.territory".into()],
+        metrics: vec!["sales".into()],
+        order_by: vec![
+            OrderBy::asc("dates.year_id"),
+            OrderBy::asc("customer_w_ter.territory"),
+        ],
+        ..Default::default()
+    });
+    assert_rows(
+        &steelwheels(),
+        &plan,
+        &[
+            "2024 | EMEA | 680.0",
+            "2024 | NA | 50.0",
+            "2025 | NA | 100.0",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn steelwheels_metrics_over_expressions_execute() {
+    let plan = steelwheels_plan(SemanticQuery {
+        group_by: vec!["dates.year_id".into()],
+        metrics: vec![
+            "revenue".into(),
+            "premium_sales".into(),
+            "avg_unit_price".into(),
+        ],
+        order_by: vec![OrderBy::asc("dates.year_id")],
+        ..Default::default()
+    });
+    // 2024: 730 over 7 units, 480 of it on the one line priced over 100.
+    assert_rows(
+        &steelwheels(),
+        &plan,
+        &[
+            "2024 | 730.0 | 480.0 | 104.28571428571429",
+            "2025 | 100.0 | 0.0 | 20.0",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn steelwheels_filters_on_a_joined_dimension_and_a_flag() {
+    let ctx = steelwheels();
+
+    let emea = steelwheels_plan(SemanticQuery {
+        group_by: vec!["dates.year_id".into()],
+        metrics: vec!["sales".into()],
+        filters: vec![FilterSpec::new(
+            "customer_w_ter.territory",
+            serde_json::json!("EMEA"),
+        )],
+        order_by: vec![OrderBy::asc("dates.year_id")],
+        ..Default::default()
+    });
+    assert_rows(&ctx, &emea, &["2024 | 680.0"]).await;
+
+    let premium = steelwheels_plan(SemanticQuery {
+        metrics: vec!["sales".into()],
+        filters: vec![FilterSpec::new(
+            "orderfact.is_premium_order",
+            serde_json::json!(true),
+        )],
+        ..Default::default()
+    });
+    assert_rows(&ctx, &premium, &["480.0"]).await;
+}
+
 /// A field without a `datatype` is read as Substrait's `unknown` extension type
 /// (ADR-0007), which DataFusion does not implement. The SQL path needs no
 /// types and runs. This pins the gap: when it closes, this test fails.
 #[tokio::test]
 async fn untyped_fields_run_as_sql_but_not_as_substrait() {
+    const UNTYPED: &str = r#"
+version: "0.2.0.dev0"
+name: untyped
+datasets:
+  - name: orders
+    source: sales.public.orders
+    fields:
+      - name: status
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: status }] }
+      - name: amount
+        expression: { dialects: [{ dialect: ANSI_SQL, expression: amount }] }
+metrics:
+  - name: revenue
+    expression: { dialects: [{ dialect: ANSI_SQL, expression: SUM(orders.amount) }] }
+"#;
     let plan = plan(
-        STEELWHEELS,
+        UNTYPED,
         &SemanticQuery {
-            group_by: vec!["dates.year_id".into()],
-            metrics: vec!["sales".into()],
-            dataset: Some("orderfact".into()),
-            order_by: vec![OrderBy::asc("dates.year_id")],
+            metrics: vec!["revenue".into()],
+            dataset: Some("orders".into()),
             ..Default::default()
         },
     );
-    let ctx = steelwheels();
-    assert_eq!(run_sql(&ctx, &plan).await, ["2024 | 730.0", "2025 | 100.0"]);
+    let ctx = shop();
+    assert_eq!(run_sql(&ctx, &plan).await, ["400.0"]);
 
     let decoded = Plan::decode(encode_plan(&to_plan(&plan).expect("emit")).as_slice())
         .expect("decode substrait");

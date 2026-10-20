@@ -1057,18 +1057,34 @@ fn scan_schema_does_not_default_everything_to_string() {
     let Some(RelType::Read(read)) = agg.input.expect("agg input").rel_type else {
         panic!("expected a read");
     };
-    let types = read
-        .base_schema
-        .expect("base_schema")
-        .r#struct
-        .expect("struct")
-        .types;
-    // The steelwheels fixture declares no datatypes, so nothing should claim String.
-    assert!(
-        types
-            .iter()
-            .all(|t| matches!(t.kind, Some(Kind::UserDefined(_)))),
-        "undeclared columns must be `unknown`, not String"
+    let schema = read.base_schema.expect("base_schema");
+    let types: Vec<(&str, &str)> = schema
+        .names
+        .iter()
+        .zip(schema.r#struct.expect("struct").types)
+        .map(|(name, t)| {
+            let kind = match t.kind {
+                Some(Kind::I64(_)) => "i64",
+                Some(Kind::Fp64(_)) => "fp64",
+                Some(Kind::Bool(_)) => "bool",
+                Some(Kind::String(_)) => "string",
+                other => panic!("{name}: unexpected {other:?}"),
+            };
+            (name.as_str(), kind)
+        })
+        .collect();
+    // Each column carries the type the fixture declares, not a String default.
+    assert_eq!(
+        types,
+        [
+            ("time_id", "i64"),
+            ("customernumber", "i64"),
+            ("quantityordered", "i64"),
+            ("totalprice", "fp64"),
+            ("priceeach", "fp64"),
+            ("is_premium_order", "bool"),
+            ("order_status", "string"),
+        ]
     );
 }
 

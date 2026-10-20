@@ -15,6 +15,7 @@ datasets:
     description: Order line fact (quantities, prices, status) with time and customer keys.
     fields:
       - name: time_id
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -24,6 +25,7 @@ datasets:
           is_time: false
 
       - name: customernumber
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -33,6 +35,7 @@ datasets:
           is_time: false
 
       - name: quantityordered
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -40,6 +43,7 @@ datasets:
         description: Units ordered on the line
 
       - name: totalprice
+        datatype: Float
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -47,6 +51,7 @@ datasets:
         description: Extended line amount (list-style revenue for the line)
 
       - name: priceeach
+        datatype: Float
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -54,6 +59,7 @@ datasets:
         description: Unit price
 
       - name: is_premium_order
+        datatype: Boolean
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -63,6 +69,7 @@ datasets:
           is_time: false
 
       - name: order_status
+        datatype: String
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -79,6 +86,7 @@ datasets:
     description: Calendar / time dimension (year, quarter, month).
     fields:
       - name: time_id
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -88,6 +96,7 @@ datasets:
           is_time: false
 
       - name: date
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -97,6 +106,7 @@ datasets:
           is_time: true
 
       - name: year_id
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -106,6 +116,7 @@ datasets:
           is_time: true
 
       - name: qtr_id
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -115,6 +126,7 @@ datasets:
           is_time: true
 
       - name: month_name
+        datatype: String
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -131,6 +143,7 @@ datasets:
     description: Customer with sales territory hierarchy (region to city).
     fields:
       - name: customernumber
+        datatype: Integer
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -140,6 +153,7 @@ datasets:
           is_time: false
 
       - name: territory
+        datatype: String
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -149,6 +163,7 @@ datasets:
           is_time: false
 
       - name: country
+        datatype: String
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -158,6 +173,7 @@ datasets:
           is_time: false
 
       - name: state
+        datatype: String
         expression:
           dialects:
             - dialect: ANSI_SQL
@@ -167,6 +183,7 @@ datasets:
           is_time: false
 
       - name: city
+        datatype: String
         expression:
           dialects:
             - dialect: ANSI_SQL
