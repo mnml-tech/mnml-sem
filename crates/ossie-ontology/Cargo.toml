@@ -1,0 +1,15 @@
+[package]
+name = "ossie-ontology"
+description = "Check Apache Ossie ontology mappings against their ontology and semantic model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["ossie", "semantic", "ontology"]
+categories = ["database"]
+
+[dependencies]
+ossie-model.workspace = true
+ossie-compiler.workspace = true

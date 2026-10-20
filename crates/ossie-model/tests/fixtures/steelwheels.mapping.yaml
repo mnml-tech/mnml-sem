@@ -1,0 +1,106 @@
+# Populates the SteelWheels ontology (steelwheels.ontology.yaml) from the Steel
+# Wheels semantic model (steelwheels.yaml).
+#
+# Country.in_territory reads country and territory off customer_w_ter, where
+# country is not a key: the dataset itself does not promise that a country sits
+# in one territory, which the relationship's ManyToOne claims. The checker
+# reports that as a warning rather than an error, since the data may well hold.
+
+version: "0.2.0.dev0"
+name: steelwheels_mapping
+description: Maps the SteelWheels ontology onto the Steel Wheels semantic model.
+ontology_ref:
+  name: SteelWheels
+  iri: ./steelwheels.ontology.yaml
+semantic_model_ref:
+  name: steelwheels
+  iri: ./steelwheels.yaml
+
+concept_mappings:
+  - concept: Territory
+    object_mappings:
+      - referent_mappings:
+          - relationship: name
+            expression: customer_w_ter.territory
+
+  - concept: Country
+    object_mappings:
+      - referent_mappings:
+          - relationship: name
+            expression: customer_w_ter.country
+    link_mappings:
+      - object_mapping:
+          referent_mappings:
+            - relationship: name
+              expression: customer_w_ter.country
+        children:
+          - relationship: in_territory
+            object_mapping:
+              concept: Territory
+              referent_mappings:
+                - relationship: name
+                  expression: customer_w_ter.territory
+
+  - concept: City
+    object_mappings:
+      - referent_mappings:
+          - relationship: name
+            expression: customer_w_ter.city
+          - relationship: country
+            referent_mappings:
+              - relationship: name
+                expression: customer_w_ter.country
+
+  - concept: Customer
+    object_mappings:
+      # Every customer on file, and every customer an order line refers to.
+      - referent_mappings:
+          - relationship: number
+            expression: customer_w_ter.customernumber
+      - referent_mappings:
+          - relationship: number
+            expression: orderfact.customernumber
+    link_mappings:
+      - object_mapping:
+          referent_mappings:
+            - relationship: number
+              expression: customer_w_ter.customernumber
+        children:
+          - relationship: located_in
+            object_mapping:
+              concept: City
+              referent_mappings:
+                - relationship: name
+                  expression: customer_w_ter.city
+                - relationship: country
+                  referent_mappings:
+                    - relationship: name
+                      expression: customer_w_ter.country
+          - relationship: in_state
+            object_mapping:
+              concept: StateName
+              expression: customer_w_ter.state
+
+  - concept: Day
+    object_mappings:
+      - referent_mappings:
+          - relationship: id
+            expression: dates.time_id
+    link_mappings:
+      - object_mapping:
+          referent_mappings:
+            - relationship: id
+              expression: dates.time_id
+        children:
+          - relationship: year
+            object_mapping:
+              concept: Year
+              expression: dates.year_id
+          - relationship: quarter
+            object_mapping:
+              concept: QuarterNr
+              expression: dates.qtr_id
+          - relationship: month
+            object_mapping:
+              concept: MonthName
+              expression: dates.month_name

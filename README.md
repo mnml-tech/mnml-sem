@@ -19,8 +19,9 @@ The repository is a Cargo workspace ([ADR-0015](docs/adr/0015-a-workspace-of-cra
 | [`ossie-model`](crates/ossie-model) | Document types, parsing, structural validation | `serde` |
 | [`ossie-compiler`](crates/ossie-compiler) | `CompiledModel`, `SemanticQuery`, binding, planning, SQL emission | `ossie-model`, `sqlparser` |
 | [`ossie-substrait`](crates/ossie-substrait) | `LogicalPlan` → Substrait | `ossie-compiler`, `substrait` |
+| [`ossie-ontology`](crates/ossie-ontology) | Checks a mapping against its ontology and semantic model | `ossie-model`, `ossie-compiler` |
 
-- **Spec-aligned** — Types follow `core-spec/ossie-schema.json`, and [`conformance.rs`](crates/ossie-model/tests/conformance.rs) checks them against a vendored copy of it ([`spec/`](crates/ossie-model/spec/)), so upstream drift shows up as a failing test.
+- **Spec-aligned** — Types follow the core, ontology and mapping schemas, and the conformance tests check them against vendored copies ([`spec/`](crates/ossie-model/spec/)), so upstream drift shows up as a failing test.
 - **Join-aware binding** — Relationships drive join paths; `dataset.field` references resolve through the model.
 - **Engine-agnostic execution** — Substrait decouples the semantic layer from any one runtime.
 - **Composable and lightweight** — Pure Rust library with no runtime server. Embed it in an API, CLI tool, or compute engine
@@ -37,6 +38,7 @@ Ossie ──► validate ──► CompiledModel ──► bind_query(SemanticQu
 |------|----------------|
 | **I/O** | Parse Ossie documents from YAML or JSON (`ossie_model::parser`) |
 | **Validation** | Check documents (`ossie_model::validate`); compile expressions (`CompiledModel`) |
+| **Ontology** | Ontology and mapping documents (`ontology/`), typed and checked against their schemas; `ossie_ontology::check` finds a mapping that names a missing concept or field, maps an identifier partly, puts a relationship at the wrong depth, or claims a many-to-one the dataset's keys do not back |
 | **Queries** | Bind [`SemanticQuery`](crates/ossie-compiler/src/query/spec.rs) (group by, metrics, filters, ordering, limit/offset, optional dataset anchor) |
 | **Planning** | `LogicalPlan` for emission or inspection; refuses a metric a join would inflate rather than returning a wrong number |
 | **Functions** | One [`catalog`](crates/ossie-compiler/src/catalog.rs) row per function carries its arity, SQL rendering, and Substrait coordinates |

@@ -8,10 +8,10 @@
 //! expressions only: no `SELECT`/`FROM`/`JOIN`, no subqueries, no CTEs. A SQL
 //! parser happily accepts those, so the gate lives here.
 //!
-//! # Three resolution modes
+//! # Four resolution modes
 //!
 //! A bare identifier means different things depending on where the expression
-//! sits, so there are three entry points:
+//! sits, so there are four entry points:
 //!
 //! - [`lower_field_expression`] — a field's *own* definition. Identifiers name
 //!   physical columns of the owning dataset. Field references are **not**
@@ -24,6 +24,9 @@
 //! - [`lower_dataset_metric_expression`] — a dataset-scoped metric. A bare name
 //!   is a declared field of that dataset, and nothing may be qualified: the
 //!   metric resolves entirely within its dataset.
+//! - [`lower_mapping_expression`] — an ontology mapping's expression.
+//!   `dataset.field` names a declared field and stays a reference to it, so the
+//!   caller sees which fields are read. A bare name is refused.
 
 use sqlparser::ast;
 use sqlparser::dialect::{
@@ -74,6 +77,9 @@ enum Scope<'a> {
         model: &'a SemanticModel,
         dataset: &'a str,
     },
+    /// An ontology mapping's expression: `dataset.field` names a declared
+    /// field, which is kept as a reference rather than substituted.
+    Mapping { model: &'a SemanticModel },
 }
 
 /// Resolution context for one lowering.
@@ -205,6 +211,32 @@ pub fn lower_dataset_metric_expression(
     lower_aggregate(sql, &ast, &ctx)
 }
 
+/// Lower an ontology mapping's expression over `model`.
+///
+/// Every identifier must be `dataset.field` naming a declared field. Each
+/// lowers to a column reference to that *field*, not to the field's own
+/// expression, so a caller can see which fields a mapping reads. Rejects
+/// aggregates and metrics: a mapping computes one value per row.
+pub fn lower_mapping_expression(
+    sql: &str,
+    dialect: Dialect,
+    model: &SemanticModel,
+) -> Result<Expr, QueryError> {
+    let ast = parse(sql, dialect)?;
+    let ctx = Ctx {
+        scope: Scope::Mapping { model },
+        dialect,
+        metrics: &NoMetrics,
+    };
+    let expr = lower(&ast, &ctx)?;
+    if expr.contains_aggregate() {
+        return Err(QueryError::InvalidExpression(format!(
+            "mapping expression {sql:?} contains an aggregate; it must compute one value per row"
+        )));
+    }
+    Ok(expr)
+}
+
 fn lower_aggregate(sql: &str, ast: &ast::Expr, ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
     let expr = lower(ast, ctx)?;
     if !expr.contains_aggregate() {
@@ -281,6 +313,12 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
                 reference: names.join("."),
             });
         }
+        (Scope::Mapping { .. }, [name]) => {
+            return Err(QueryError::InvalidFieldRef(format!(
+                "{name:?} names no dataset; a mapping expression names fields as dataset.field"
+            )));
+        }
+        (Scope::Mapping { model }, [dataset, name]) => (model, dataset.clone(), name.clone()),
         (_, _) => {
             return Err(QueryError::InvalidFieldRef(format!(
                 "identifier {:?} has more than two parts",
@@ -315,6 +353,9 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
                 // A model-scoped metric builds on it by substitution, as it
                 // does on another model-scoped metric.
                 Scope::ModelMetric { .. } => ctx.metrics.lookup_dataset_metric(&dataset, &name),
+                Scope::Mapping { .. } => Err(QueryError::InvalidFieldRef(format!(
+                    "{dataset}.{name} is a metric; a mapping expression names fields"
+                ))),
                 _ => Err(QueryError::MetricInDatasetMetric {
                     dataset: dataset.clone(),
                     metric: name.clone(),
@@ -339,6 +380,10 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
             None => QueryError::FieldNotFound(format!("{dataset}.{name}")),
         });
     };
+
+    if let Scope::Mapping { .. } = ctx.scope {
+        return Ok(Expr::column(dataset, field.name.clone()));
+    }
 
     let (field_dialect, sql) = super::pick_expression_dialect(&field.expression)
         .ok_or(QueryError::MissingExpressionSql)?;
@@ -793,6 +838,37 @@ datasets:
 
     fn field_expr(sql: &str) -> Expr {
         lower_field_expression(sql, Dialect::AnsiSql, "orders").expect(sql)
+    }
+
+    fn mapping_expr(sql: &str) -> Result<Expr, QueryError> {
+        lower_mapping_expression(sql, Dialect::AnsiSql, &model())
+    }
+
+    /// A mapping keeps the field it names, rather than the field's own
+    /// expression: `full_name` stays `full_name`, not a concatenation.
+    #[test]
+    fn a_mapping_expression_names_fields() {
+        assert_eq!(
+            mapping_expr("orders.full_name").expect("field"),
+            Expr::column("orders", "full_name")
+        );
+        let upper = mapping_expr("UPPER(orders.full_name)").expect("scalar");
+        assert_eq!(
+            upper.referenced_datasets().into_iter().collect::<Vec<_>>(),
+            ["orders"]
+        );
+    }
+
+    #[test]
+    fn a_mapping_expression_refuses_what_is_not_a_field() {
+        let err = |sql: &str| mapping_expr(sql).expect_err(sql).to_string();
+        assert!(
+            err("amount").contains("names no dataset"),
+            "{}",
+            err("amount")
+        );
+        assert!(err("orders.missing").contains("orders.missing"));
+        assert!(err("SUM(orders.amount)").contains("aggregate"));
     }
 
     #[test]

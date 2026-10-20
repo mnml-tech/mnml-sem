@@ -53,6 +53,10 @@ fn fixture_docs() -> Vec<(&'static str, Value)> {
             "people_daily_tenant.yaml",
             include_str!("fixtures/people_daily_tenant.yaml"),
         ),
+        (
+            "flights.semantic_model.yaml",
+            include_str!("fixtures/flights.semantic_model.yaml"),
+        ),
     ]
     .into_iter()
     .map(|(name, src)| {

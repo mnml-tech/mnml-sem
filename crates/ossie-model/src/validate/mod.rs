@@ -1,4 +1,10 @@
-//! Semantic validation beyond Serde (uniqueness, references, schema constraints).
+//! Semantic validation beyond Serde (uniqueness, references, schema constraints),
+//! for semantic models here, and for ontologies and mappings in
+//! [`validate_ontology`] and [`validate_mapping`].
+
+mod ontology;
+
+pub use ontology::{validate_mapping, validate_ontology};
 
 use crate::error::Error;
 use crate::{Expression, OSSIE_SPEC_VERSION, OssieDocument};

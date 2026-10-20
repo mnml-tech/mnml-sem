@@ -41,13 +41,16 @@ Parse the expression text and lower it to the plan IR.
 - A SQL parser accepts far more than an Ossie expression may contain. The
   lowering pass is where that is enforced: `SELECT`, `FROM`, `JOIN`, subqueries
   and the rest are rejected with a reason.
-- Identifiers resolve in one of three modes. A field's own definition reads
+- Identifiers resolve in one of four modes. A field's own definition reads
   physical columns of its dataset; a model-scoped metric's expression resolves
   `dataset.field` through the model to that field's definition; a
   dataset-scoped metric's expression resolves a bare name to a declared field
   of its own dataset and refuses anything qualified
-  ([ADR-0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md)). Without
-  the split, a field whose expression is `id` would resolve to itself forever.
+  ([ADR-0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md)); an
+  ontology mapping's expression resolves `dataset.field` to the field itself,
+  not its definition, so a checker sees which fields a mapping reads
+  ([ADR-0015](0015-a-workspace-of-crates.md)). Without the split, a field whose
+  expression is `id` would resolve to itself forever.
 - **Identifier text is preserved; matching is what varies.** The expression
   language says an unquoted identifier is case-insensitive and that the
   normalized form used for matching is upper-cased. Normalizing for *matching*

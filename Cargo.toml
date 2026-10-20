@@ -13,6 +13,7 @@ license = "MIT OR Apache-2.0"
 ossie-model = { path = "crates/ossie-model", version = "0.1.0" }
 ossie-compiler = { path = "crates/ossie-compiler", version = "0.1.0" }
 ossie-substrait = { path = "crates/ossie-substrait", version = "0.1.0" }
+ossie-ontology = { path = "crates/ossie-ontology", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

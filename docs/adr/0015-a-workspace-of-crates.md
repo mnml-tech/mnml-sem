@@ -93,8 +93,9 @@ on those above it:
 - **The restructure is mechanical, and it lands on its own.** It is one change
   made of `git mv`, path rewrites and manifest changes, with no behavior
   change, so history follows the files and the review stays readable. The same
-  tests pass before and after. `ossie-ontology` and the ontology types follow
-  in later changes; the crate is created with its first code.
+  tests pass before and after. `ossie-ontology` and the ontology types
+  followed separately, the crate created with its first code: checking the
+  Steel Wheels mapping.
 
 **The crate names are the ones above, for now.** The repository is renamed
 `mnml-sem`, from `osi-substrait`, which carried the pre-rename OSI and
