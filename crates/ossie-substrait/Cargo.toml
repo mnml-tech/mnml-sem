@@ -17,5 +17,10 @@ substrait.workspace = true
 prost.workspace = true
 
 [dev-dependencies]
+# DataFusion consumes and executes the emitted plans (tests/datafusion.rs). It is
+# a dev-dependency only, so it never reaches consumers of this crate.
+datafusion.workspace = true
+datafusion-substrait.workspace = true
+tokio.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

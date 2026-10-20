@@ -88,7 +88,7 @@ cargo test --workspace
 
 Conformance: [`spec/README.md`](crates/ossie-model/spec/README.md) explains how to refresh the vendored Ossie schema; the tests then report exactly what moved.
 
-Fixtures: [`crates/ossie-model/tests/fixtures/`](crates/ossie-model/tests/fixtures/), shared by every crate's tests. The end-to-end tests (parse → plan → SQL and Substrait) live in [`crates/ossie-substrait/tests/`](crates/ossie-substrait/tests/). The TPC-DS example test is **`#[ignore]`** unless you clone [Ossie](https://github.com/apache/ossie) next to this repo (`../ossie/examples/…`); then `cargo test --workspace -- --include-ignored`.
+Fixtures: [`crates/ossie-model/tests/fixtures/`](crates/ossie-model/tests/fixtures/), shared by every crate's tests. The end-to-end tests (parse → plan → SQL and Substrait) live in [`crates/ossie-substrait/tests/`](crates/ossie-substrait/tests/). Among them, [`datafusion.rs`](crates/ossie-substrait/tests/datafusion.rs) has [DataFusion](https://datafusion.apache.org) (a dev-dependency only) execute both the emitted Substrait plan and the emitted SQL against in-memory tables, and checks they return the same rows. The TPC-DS example test is **`#[ignore]`** unless you clone [Ossie](https://github.com/apache/ossie) next to this repo (`../ossie/examples/…`); then `cargo test --workspace -- --include-ignored`.
 
 ## License
 

@@ -207,7 +207,10 @@ pub fn build_logical_plan(
     };
 
     // Ordering goes above the projection, so it can name metric outputs.
-    let plan = match sort_keys(&plan, &bound.order_by)? {
+    // A single-dataset plan leaves its columns unqualified, so `orders.status`
+    // must still find `status` when `orders` is the one dataset read.
+    let unqualified = (!qualify).then_some(bound.root_dataset.as_str());
+    let plan = match sort_keys(&plan, &bound.order_by, unqualified)? {
         keys if keys.is_empty() => plan,
         keys => LogicalPlan::Sort {
             input: Box::new(plan),
@@ -230,7 +233,13 @@ pub fn build_logical_plan(
 }
 
 /// Resolve each ordering term against what the plan actually produces.
-fn sort_keys(plan: &LogicalPlan, order_by: &[OrderBy]) -> Result<Vec<SortKey>, QueryError> {
+///
+/// `unqualified` names the plan's one dataset when its columns carry none.
+fn sort_keys(
+    plan: &LogicalPlan,
+    order_by: &[OrderBy],
+    unqualified: Option<&str>,
+) -> Result<Vec<SortKey>, QueryError> {
     if order_by.is_empty() {
         return Ok(Vec::new());
     }
@@ -248,6 +257,11 @@ fn sort_keys(plan: &LogicalPlan, order_by: &[OrderBy]) -> Result<Vec<SortKey>, Q
             };
             let index = find_column(&schema, "", &o.reference)
                 .or_else(|| find_column(&schema, dataset, name))
+                .or_else(|| {
+                    (unqualified == Some(dataset))
+                        .then(|| find_column(&schema, "", name))
+                        .flatten()
+                })
                 .ok_or_else(|| QueryError::OrderByNotSelected {
                     reference: o.reference.clone(),
                     available: schema

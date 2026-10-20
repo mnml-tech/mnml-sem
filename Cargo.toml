@@ -21,3 +21,7 @@ substrait = { version = "0.63", features = ["serde"] }
 prost = "0.14"
 thiserror = "2"
 jsonschema = "0.56"
+# Test-only: a real Substrait consumer executes the plans ossie-substrait emits.
+datafusion = "54"
+datafusion-substrait = "54"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

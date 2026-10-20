@@ -1391,6 +1391,30 @@ fn ordering_by_a_grouped_field_either_spelling() {
     }
 }
 
+/// A single-dataset plan leaves its columns unqualified; the qualified
+/// spelling must still find them.
+#[test]
+fn ordering_a_single_dataset_query_by_either_spelling() {
+    let model = steelwheels_model();
+    for reference in ["orderfact.order_status", "order_status"] {
+        let spec = SemanticQuery {
+            group_by: vec!["orderfact.order_status".into()],
+            metrics: vec!["sales".into()],
+            dataset: Some("orderfact".into()),
+            order_by: vec![OrderBy::asc(reference)],
+            ..Default::default()
+        };
+        let bound = bind_query(&model, &spec).expect("bind");
+        let plan =
+            build_logical_plan(&bound, &model).unwrap_or_else(|e| panic!("{reference}: {e}"));
+        let sql = to_sql(&plan).expect("sql");
+        assert!(
+            sql.contains("ORDER BY order_status ASC"),
+            "{reference}: {sql}"
+        );
+    }
+}
+
 /// You can only order by what you selected — anything else is a query error,
 /// with the available names listed.
 #[test]
