@@ -1,0 +1,21 @@
+[package]
+name = "ossie-substrait"
+description = "Emit Substrait plans from compiled Apache Ossie queries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["ossie", "semantic", "substrait"]
+categories = ["database"]
+
+[dependencies]
+ossie-model.workspace = true
+ossie-compiler.workspace = true
+substrait.workspace = true
+prost.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+serde_yaml.workspace = true

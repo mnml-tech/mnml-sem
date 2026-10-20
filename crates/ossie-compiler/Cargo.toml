@@ -1,0 +1,25 @@
+[package]
+name = "ossie-compiler"
+description = "Compile Apache Ossie semantic models and queries into logical plans and SQL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["ossie", "semantic", "sql"]
+categories = ["database"]
+
+[dependencies]
+ossie-model.workspace = true
+# Parses Ossie expression strings into an AST; the lowering pass in
+# `plan::ossie_sql` maps that AST onto this crate's `plan::Expr`.
+sqlparser.workspace = true
+# The query contract (`query::SemanticQuery`) is serde-deserializable.
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+serde_yaml.workspace = true

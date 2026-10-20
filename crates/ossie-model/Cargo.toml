@@ -1,0 +1,23 @@
+[package]
+name = "ossie-model"
+description = "Apache Ossie documents: types, parsing and structural validation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "../../README.md"
+keywords = ["ossie", "semantic"]
+categories = ["database", "parser-implementations"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Conformance tests only: the vendored Ossie schema is checked against this
+# crate's types and fixtures. The library itself does not validate with it —
+# the serde model types are the runtime contract.
+jsonschema.workspace = true

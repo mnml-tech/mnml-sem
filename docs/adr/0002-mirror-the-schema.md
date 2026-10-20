@@ -36,7 +36,7 @@ schema spells them, `deny_unknown_fields` throughout, optionality following the
 schema's `required`. Nothing is smoothed over, renamed, or dropped, and the
 crate's own conveniences are methods on those types rather than a second shape.
 
-Vendor `ossie-schema.json` under [`spec/`](../../spec/), recording the upstream
+Vendor `ossie-schema.json` under [`crates/ossie-model/spec/`](../../crates/ossie-model/spec/), recording the upstream
 commit it came from, and assert in the test suite that:
 
 - the spec version this crate targets is the version the schema pins,
