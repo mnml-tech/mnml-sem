@@ -173,7 +173,7 @@ pub fn build_logical_plan(
     let metrics: Vec<NamedExpr> = bound
         .metrics
         .iter()
-        .map(|m| NamedExpr::new(&m.name, m.expr.clone()))
+        .map(|m| NamedExpr::new(m.reference(), m.expr.clone()))
         .collect();
 
     check_fan_out(&metrics, &bound.fanned_datasets)?;
@@ -238,14 +238,17 @@ fn sort_keys(plan: &LogicalPlan, order_by: &[OrderBy]) -> Result<Vec<SortKey>, Q
     order_by
         .iter()
         .map(|o| {
-            // `dataset.field`, or a bare name — which also matches a metric,
-            // since a metric output carries no dataset.
+            // A metric output carries no dataset and is named by its
+            // reference, so a dataset-scoped `orders.total` matches whole.
+            // Otherwise `dataset.field`, or a bare name. A field and a metric
+            // of one dataset never share a name, so the two cannot collide.
             let (dataset, name) = match o.reference.split_once('.') {
                 Some((d, n)) if !d.is_empty() && !n.is_empty() => (d, n),
                 _ => ("", o.reference.as_str()),
             };
-            let index = find_column(&schema, dataset, name).ok_or_else(|| {
-                QueryError::OrderByNotSelected {
+            let index = find_column(&schema, "", &o.reference)
+                .or_else(|| find_column(&schema, dataset, name))
+                .ok_or_else(|| QueryError::OrderByNotSelected {
                     reference: o.reference.clone(),
                     available: schema
                         .iter()
@@ -258,8 +261,7 @@ fn sort_keys(plan: &LogicalPlan, order_by: &[OrderBy]) -> Result<Vec<SortKey>, Q
                         })
                         .collect::<Vec<_>>()
                         .join(", "),
-                }
-            })?;
+                })?;
             let col = &schema[index];
             Ok(SortKey {
                 expr: Expr::column(&col.dataset, &col.name),

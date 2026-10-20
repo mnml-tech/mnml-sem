@@ -1,0 +1,124 @@
+# Dataset-scoped metrics, as proposed in apache/ossie#591 (ADR-0014).
+#
+# Not a legal document against the vendored schema yet, so it is deliberately
+# absent from the conformance fixture list. When the schema refresh brings in
+# `datasets[].metrics`, add it there.
+version: "0.2.0.dev0"
+
+name: dataset_metrics
+datasets:
+  - name: orders
+    source: sales.public.orders
+    primary_key: [order_id]
+    fields:
+      - name: order_id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: order_id
+      - name: customer_id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: customer_id
+      - name: status
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: status
+      # Declared so a scan reads them: a scan exposes only columns some field
+      # reads directly.
+      - name: amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: amount
+      - name: discount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: discount
+      - name: net_amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: amount - discount
+    metrics:
+      - name: total_net_amount
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(net_amount)
+        datatype: Decimal
+      - name: order_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(order_id)
+        datatype: Integer
+
+  - name: customers
+    source: sales.public.customers
+    primary_key: [id]
+    fields:
+      - name: id
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: id
+      - name: region
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: region
+      - name: credit_limit
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: credit_limit
+    metrics:
+      - name: customer_count
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: COUNT(DISTINCT id)
+        datatype: Integer
+      - name: total_credit
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(credit_limit)
+        datatype: Decimal
+
+relationships:
+  - name: orders_to_customers
+    from: orders
+    to: customers
+    from_columns: [customer_id]
+    to_columns: [id]
+
+metrics:
+  # Model-scoped, and spelled like the dataset-scoped metric on purpose: the
+  # two live in different namespaces.
+  - name: total_net_amount
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orders.net_amount)
+  - name: revenue_per_customer
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: SUM(orders.net_amount) / COUNT(DISTINCT customers.id)
+  # The same quantity built from dataset-scoped metrics, and one more level on
+  # top of that.
+  - name: net_per_customer
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: orders.total_net_amount / customers.customer_count
+  - name: net_per_customer_pct
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: net_per_customer * 100

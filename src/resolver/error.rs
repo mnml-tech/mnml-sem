@@ -21,6 +21,21 @@ pub enum QueryError {
     )]
     UnknownMetricReference(String),
 
+    /// A dataset-scoped metric resolves entirely within its dataset, so its
+    /// fields are written unqualified.
+    #[error(
+        "{reference:?} is qualified, but a metric of dataset {dataset:?} references that \
+         dataset's fields by bare name; a metric reading another dataset is model-scoped"
+    )]
+    QualifiedInDatasetMetric { dataset: String, reference: String },
+
+    /// A dataset-scoped metric reads declared fields only, not its siblings.
+    #[error(
+        "{metric:?} is a metric of dataset {dataset:?}; a dataset-scoped metric may reference \
+         only that dataset's declared fields"
+    )]
+    MetricInDatasetMetric { dataset: String, metric: String },
+
     #[error("metric reference cycle: {path}")]
     MetricCycle { path: String },
 

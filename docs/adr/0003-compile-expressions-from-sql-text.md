@@ -41,10 +41,13 @@ Parse the expression text and lower it to the plan IR.
 - A SQL parser accepts far more than an Ossie expression may contain. The
   lowering pass is where that is enforced: `SELECT`, `FROM`, `JOIN`, subqueries
   and the rest are rejected with a reason.
-- Identifiers resolve in one of two modes. A field's own definition reads
-  physical columns of its dataset; a metric's expression resolves
-  `dataset.field` through the model to that field's definition. Without the
-  split, a field whose expression is `id` would resolve to itself forever.
+- Identifiers resolve in one of three modes. A field's own definition reads
+  physical columns of its dataset; a model-scoped metric's expression resolves
+  `dataset.field` through the model to that field's definition; a
+  dataset-scoped metric's expression resolves a bare name to a declared field
+  of its own dataset and refuses anything qualified
+  ([ADR-0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md)). Without
+  the split, a field whose expression is `id` would resolve to itself forever.
 - **Identifier text is preserved; matching is what varies.** The expression
   language says an unquoted identifier is case-insensitive and that the
   normalized form used for matching is upper-cased. Normalizing for *matching*
@@ -81,14 +84,26 @@ Parse the expression text and lower it to the plan IR.
   involved. A reference inside an aggregate is an error, because a metric is
   already aggregated. Cycles are an error naming the path.
 
-  The spelling is the one the spec gives: an unqualified metric reference
-  resolves to a model-scoped metric. Whether such a reference may appear inside
-  an expression at all is not stated — the namespace rules are deferred to a
-  semantics document that is not published — so this is the natural reading of
-  an undefined area rather than an implementation of a stated one. Unlike the
-  question in [ADR-0013](0013-cross-grain-metric-semantics.md), there is only
-  one reading: if `total_profit / total_revenue` means anything, it means the
-  ratio of those two quantities at the query's grain.
+  **This goes beyond the spec.** Metric references are not defined upstream,
+  and [apache/ossie#486](https://github.com/apache/ossie/pull/486), which is
+  close to merging, says outright that a metric expression cannot refer to
+  another metric, and lists the feature among those "future versions may add".
+  An earlier version of this record attributed the bare-name spelling to the
+  schema; it is not there. The spelling is ours: a bare name is free in a
+  metric expression, because a column must be written `dataset.field`.
+
+  The meaning is less of a guess than the spelling. Unlike the question in
+  [ADR-0013](0013-cross-grain-metric-semantics.md), there is only one reading:
+  if `total_profit / total_revenue` means anything, it means the ratio of those
+  two quantities at the query's grain. A metric written by substitution is
+  always the metric written out by hand, so whatever upstream decides, a number
+  this returns is one the hand-written model would return too.
+
+  A model-scoped metric may also build on a dataset-scoped one, as
+  `dataset.metric`. That spelling is not ours: it is how
+  [ADR-0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md)'s proposal
+  says a dataset-scoped metric is referenced, and the shared namespace makes
+  it unambiguous.
 
   Re-aggregating a metric (`AVG(some_metric)`) is a different feature needing
   grain, and is refused by the same rule that refuses nesting.
@@ -116,7 +131,9 @@ Parse the expression text and lower it to the plan IR.
 - A bare name in a metric expression is a metric reference and nothing else.
   A column written without its dataset is an error naming both spellings,
   rather than being silently resolved against some default.
-- Only model-scoped metrics exist here. Were dataset-scoped metrics to be
-  added, a bare name inside one of those would mean a column of its source
-  rather than a metric — a second rule alongside this one, not a change to it.
+- A bare name means something different in each scope: in a model-scoped
+  metric it is a metric, in a dataset-scoped one a declared field of that
+  dataset. That is a second rule alongside the first, not a change to it, and
+  neither reaches a source column no field declares
+  ([ADR-0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md)).
 

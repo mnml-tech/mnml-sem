@@ -22,4 +22,4 @@ is current.
 | [0011](0011-refuse-a-metric-a-join-would-inflate.md) | Refuse a metric a join would inflate | Accepted |
 | [0012](0012-sql-emission-accumulates-clauses.md) | SQL emission accumulates clauses | Accepted |
 | [0013](0013-cross-grain-metric-semantics.md) | Cross-grain metric semantics | **Proposed** |
-
+| [0014](0014-dataset-scoped-metrics-ahead-of-the-schema.md) | Dataset-scoped metrics, ahead of the schema | Accepted |

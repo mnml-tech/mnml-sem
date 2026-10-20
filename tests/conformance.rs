@@ -271,3 +271,25 @@ fn the_parser_is_not_stricter_than_the_schema() {
     parser::from_json_str(&doc.to_string())
         .expect("a document the schema accepts must parse here too");
 }
+
+/// Dataset-scoped metrics are implemented ahead of the schema (ADR-0014), so
+/// this crate accepts `datasets[].metrics` while the vendored schema does not.
+///
+/// When a refresh brings the property in, this fails. Then: add
+/// `dataset_metrics.yaml` to [`fixture_docs`], add `metrics` to the dataset in
+/// [`the_parser_is_not_stricter_than_the_schema`], check the merged rules
+/// against ADR-0014, and delete this test.
+#[test]
+fn dataset_metrics_are_still_ahead_of_the_schema() {
+    let schema = schema();
+    let dataset = &schema["$defs"]["Dataset"]["properties"];
+    assert!(
+        dataset.is_object(),
+        "the schema no longer has $defs.Dataset.properties"
+    );
+    assert!(
+        dataset.get("metrics").is_none(),
+        "the vendored schema now defines datasets[].metrics; this crate implemented it ahead \
+         of the spec, so reconcile the two (see the comment on this test) and remove it"
+    );
+}

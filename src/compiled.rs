@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::error::Error;
-use crate::model::{DataType, Dataset, Field, OssieDocument, Relationship, SemanticModel};
+use crate::model::{DataType, Dataset, Field, Metric, OssieDocument, Relationship, SemanticModel};
 use crate::plan::ossie_sql::{self, MetricLookup};
 use crate::plan::{Expr, pick_expression_dialect};
 use crate::resolver::QueryError;
@@ -40,17 +40,22 @@ pub struct CompiledField {
     pub physical_column: Option<String>,
 }
 
-/// A dataset with its fields compiled.
+/// A dataset with its fields and dataset-scoped metrics compiled.
 #[derive(Debug, Clone)]
 pub struct CompiledDataset {
     pub name: String,
     pub source: String,
     pub fields: Vec<CompiledField>,
+    pub metrics: Vec<CompiledMetric>,
 }
 
 impl CompiledDataset {
     pub fn field(&self, name: &str) -> Option<&CompiledField> {
         self.fields.iter().find(|f| f.name == name)
+    }
+
+    pub fn metric(&self, name: &str) -> Option<&CompiledMetric> {
+        self.metrics.iter().find(|m| m.name == name)
     }
 
     /// Physical columns a scan of this dataset exposes, in declaration order.
@@ -77,6 +82,9 @@ impl CompiledDataset {
 #[derive(Debug, Clone)]
 pub struct CompiledMetric {
     pub name: String,
+    /// The declaring dataset of a dataset-scoped metric; `None` for a
+    /// model-scoped one.
+    pub dataset: Option<String>,
     pub datatype: Option<DataType>,
     pub expr: Expr,
     /// Datasets this metric's expression reads. Ossie metrics may span
@@ -84,11 +92,23 @@ pub struct CompiledMetric {
     pub datasets: BTreeSet<String>,
 }
 
+impl CompiledMetric {
+    /// How a query names this metric, which is also its output column:
+    /// `dataset.metric` when dataset-scoped, the bare name otherwise.
+    pub fn reference(&self) -> String {
+        match &self.dataset {
+            Some(ds) => format!("{ds}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
 /// What a [`CompileIssue`] is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueTarget {
     Field { dataset: String, field: String },
     Metric { name: String },
+    DatasetMetric { dataset: String, metric: String },
 }
 
 impl IssueTarget {
@@ -102,6 +122,13 @@ impl IssueTarget {
     pub fn metric(name: impl Into<String>) -> Self {
         IssueTarget::Metric { name: name.into() }
     }
+
+    pub fn dataset_metric(dataset: impl Into<String>, metric: impl Into<String>) -> Self {
+        IssueTarget::DatasetMetric {
+            dataset: dataset.into(),
+            metric: metric.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for IssueTarget {
@@ -109,6 +136,9 @@ impl std::fmt::Display for IssueTarget {
         match self {
             IssueTarget::Field { dataset, field } => write!(f, "field {dataset:?}.{field:?}"),
             IssueTarget::Metric { name } => write!(f, "metric {name:?}"),
+            IssueTarget::DatasetMetric { dataset, metric } => {
+                write!(f, "metric {dataset:?}.{metric:?}")
+            }
         }
     }
 }
@@ -171,18 +201,19 @@ impl CompiledModel {
         let datasets: Vec<CompiledDataset> = model
             .datasets
             .iter()
-            .map(|ds| compile_dataset(ds, &mut issues))
+            .map(|ds| compile_dataset(ds, model, &mut issues))
             .collect();
 
         // A metric may reference another, so they resolve through a shared
         // resolver that compiles each once and catches cycles, rather than
         // being compiled independently.
-        let resolver = MetricResolver::new(model);
+        let resolver = MetricResolver::new(model, &datasets);
         let mut metrics: Vec<CompiledMetric> = Vec::new();
         for m in &model.metrics {
             match resolver.resolve(&m.name) {
                 Ok(expr) => metrics.push(CompiledMetric {
                     name: m.name.clone(),
+                    dataset: None,
                     datatype: m.datatype,
                     datasets: expr.referenced_datasets(),
                     expr,
@@ -212,8 +243,14 @@ impl CompiledModel {
         self.datasets.iter().find(|d| d.name == name)
     }
 
+    /// A model-scoped metric by name.
     pub fn metric(&self, name: &str) -> Option<&CompiledMetric> {
         self.metrics.iter().find(|m| m.name == name)
+    }
+
+    /// A dataset-scoped metric of `dataset`.
+    pub fn dataset_metric(&self, dataset: &str, name: &str) -> Option<&CompiledMetric> {
+        self.dataset(dataset)?.metric(name)
     }
 }
 
@@ -224,6 +261,9 @@ impl CompiledModel {
 /// leaves — so nothing downstream needs to know a reference was involved.
 struct MetricResolver<'a> {
     model: &'a SemanticModel,
+    /// Already compiled, so a dataset-scoped metric is lowered once however
+    /// many model-scoped metrics build on it.
+    datasets: &'a [CompiledDataset],
     compiled: RefCell<HashMap<String, Expr>>,
     /// Names currently being resolved, innermost last. A name already here is
     /// a cycle, and the stack is the path to report.
@@ -231,9 +271,10 @@ struct MetricResolver<'a> {
 }
 
 impl<'a> MetricResolver<'a> {
-    fn new(model: &'a SemanticModel) -> Self {
+    fn new(model: &'a SemanticModel, datasets: &'a [CompiledDataset]) -> Self {
         Self {
             model,
+            datasets,
             compiled: RefCell::new(HashMap::new()),
             in_progress: RefCell::new(Vec::new()),
         }
@@ -284,18 +325,94 @@ impl MetricLookup for MetricResolver<'_> {
             },
         })
     }
+
+    /// A dataset-scoped metric references no metric, so it cannot be part of
+    /// a cycle and is compiled already.
+    fn lookup_dataset_metric(&self, dataset: &str, name: &str) -> Result<Expr, QueryError> {
+        let compiled = self
+            .datasets
+            .iter()
+            .find(|d| d.name == dataset)
+            .and_then(|d| d.metric(name));
+        if let Some(m) = compiled {
+            return Ok(m.expr.clone());
+        }
+        // Declared but absent: it failed to compile. Lowering it again is the
+        // simplest way to say why, and this path is only taken on failure.
+        let reason = self
+            .model
+            .datasets
+            .iter()
+            .find(|d| d.name == dataset)
+            .and_then(|d| d.metrics.iter().find(|m| m.name == name))
+            .map(|m| match pick_expression_dialect(&m.expression) {
+                None => QueryError::MissingExpressionSql.to_string(),
+                Some((dialect, sql)) => {
+                    ossie_sql::lower_dataset_metric_expression(&sql, dialect, self.model, dataset)
+                        .err()
+                        .map_or_else(|| "it did not compile".to_string(), |e| e.to_string())
+                }
+            })
+            .unwrap_or_else(|| "it is not declared".to_string());
+        Err(QueryError::MetricReferenceFailed {
+            metric: format!("{dataset}.{name}"),
+            reason,
+        })
+    }
 }
 
-fn compile_dataset(ds: &Dataset, issues: &mut Vec<CompileIssue>) -> CompiledDataset {
+fn compile_dataset(
+    ds: &Dataset,
+    model: &SemanticModel,
+    issues: &mut Vec<CompileIssue>,
+) -> CompiledDataset {
     let fields = ds
         .fields
         .iter()
         .filter_map(|f| compile_field(f, &ds.name, issues))
         .collect();
+    let metrics = ds
+        .metrics
+        .iter()
+        .filter_map(|m| compile_dataset_metric(m, &ds.name, model, issues))
+        .collect();
     CompiledDataset {
         name: ds.name.clone(),
         source: ds.source.clone(),
         fields,
+        metrics,
+    }
+}
+
+/// A dataset-scoped metric reads only its own dataset's fields, so it needs
+/// no resolver: there is no metric for it to reference.
+fn compile_dataset_metric(
+    metric: &Metric,
+    dataset: &str,
+    model: &SemanticModel,
+    issues: &mut Vec<CompileIssue>,
+) -> Option<CompiledMetric> {
+    let target = IssueTarget::dataset_metric(dataset, &metric.name);
+    let lowered = pick_expression_dialect(&metric.expression)
+        .ok_or(QueryError::MissingExpressionSql)
+        .and_then(|(dialect, sql)| {
+            ossie_sql::lower_dataset_metric_expression(&sql, dialect, model, dataset)
+        });
+    match lowered {
+        Ok(expr) => Some(CompiledMetric {
+            name: metric.name.clone(),
+            dataset: Some(dataset.to_string()),
+            datatype: metric.datatype,
+            datasets: expr.referenced_datasets(),
+            expr,
+        }),
+        Err(e) => {
+            issues.push(CompileIssue {
+                target,
+                message: e.to_string(),
+            });
+            None
+        }
     }
 }
 

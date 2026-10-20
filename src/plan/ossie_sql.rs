@@ -8,10 +8,10 @@
 //! expressions only: no `SELECT`/`FROM`/`JOIN`, no subqueries, no CTEs. A SQL
 //! parser happily accepts those, so the gate lives here.
 //!
-//! # Two resolution modes
+//! # Three resolution modes
 //!
 //! A bare identifier means different things depending on where the expression
-//! sits, so there are two entry points:
+//! sits, so there are three entry points:
 //!
 //! - [`lower_field_expression`] — a field's *own* definition. Identifiers name
 //!   physical columns of the owning dataset. Field references are **not**
@@ -19,7 +19,11 @@
 //!   itself forever.
 //! - [`lower_metric_expression`] — a metric. `dataset.field` names a *field*,
 //!   resolved through the model to that field's expression (itself lowered in
-//!   field-definition mode).
+//!   field-definition mode), or names a dataset-scoped metric. A bare name is
+//!   another model-scoped metric.
+//! - [`lower_dataset_metric_expression`] — a dataset-scoped metric. A bare name
+//!   is a declared field of that dataset, and nothing may be qualified: the
+//!   metric resolves entirely within its dataset.
 
 use sqlparser::ast;
 use sqlparser::dialect::{
@@ -37,7 +41,11 @@ use crate::resolver::QueryError;
 /// Implemented by the compiler, which owns the memo and the cycle detection;
 /// the lowering pass only needs to ask.
 pub trait MetricLookup {
+    /// A model-scoped metric, named bare.
     fn lookup(&self, name: &str) -> Result<Expr, QueryError>;
+
+    /// A dataset-scoped metric, named `dataset.name`.
+    fn lookup_dataset_metric(&self, dataset: &str, name: &str) -> Result<Expr, QueryError>;
 }
 
 /// A lookup for callers with no metrics to resolve against.
@@ -47,15 +55,30 @@ impl MetricLookup for NoMetrics {
     fn lookup(&self, name: &str) -> Result<Expr, QueryError> {
         Err(QueryError::UnknownMetricReference(name.to_string()))
     }
+
+    fn lookup_dataset_metric(&self, dataset: &str, name: &str) -> Result<Expr, QueryError> {
+        Err(QueryError::MetricNotFound(format!("{dataset}.{name}")))
+    }
+}
+
+/// What the expression being lowered is, which decides what a name means.
+#[derive(Clone, Copy)]
+enum Scope<'a> {
+    /// A field's own definition: identifiers are physical columns of `dataset`.
+    FieldDefinition { dataset: &'a str },
+    /// A model-scoped metric: `dataset.field` resolves through the model, and
+    /// a bare name is another metric.
+    ModelMetric { model: &'a SemanticModel },
+    /// A dataset-scoped metric: a bare name is a declared field of `dataset`.
+    DatasetMetric {
+        model: &'a SemanticModel,
+        dataset: &'a str,
+    },
 }
 
 /// Resolution context for one lowering.
 struct Ctx<'a> {
-    /// `Some` in metric mode: `dataset.field` resolves through the model.
-    /// `None` in field-definition mode: identifiers are physical columns.
-    model: Option<&'a SemanticModel>,
-    /// Dataset that unqualified identifiers belong to.
-    dataset: Option<&'a str>,
+    scope: Scope<'a>,
     /// Dialect the source text was written in, for nested lowering.
     dialect: Dialect,
     /// Resolves a bare name in a metric expression.
@@ -128,8 +151,7 @@ pub fn lower_field_expression(
 ) -> Result<Expr, QueryError> {
     let ast = parse(sql, dialect)?;
     let ctx = Ctx {
-        model: None,
-        dataset: Some(dataset),
+        scope: Scope::FieldDefinition { dataset },
         dialect,
         metrics: &NoMetrics,
     };
@@ -154,12 +176,37 @@ pub fn lower_metric_expression(
 ) -> Result<Expr, QueryError> {
     let ast = parse(sql, dialect)?;
     let ctx = Ctx {
-        model: Some(model),
-        dataset: None,
+        scope: Scope::ModelMetric { model },
         dialect,
         metrics,
     };
-    let expr = lower(&ast, &ctx)?;
+    lower_aggregate(sql, &ast, &ctx)
+}
+
+/// Lower a dataset-scoped metric of `dataset`. A bare name is one of that
+/// dataset's declared fields; a qualified name is refused.
+///
+/// Requires at least one aggregate, as a model-scoped metric does.
+pub fn lower_dataset_metric_expression(
+    sql: &str,
+    dialect: Dialect,
+    model: &SemanticModel,
+    dataset: &str,
+) -> Result<Expr, QueryError> {
+    let ast = parse(sql, dialect)?;
+    let ctx = Ctx {
+        scope: Scope::DatasetMetric { model, dataset },
+        dialect,
+        // Rule 1 of the proposal: only declared fields, so no metric is ever
+        // looked up. A bare name that is a sibling metric is reported by
+        // `resolve_identifier`, which knows it is one.
+        metrics: &NoMetrics,
+    };
+    lower_aggregate(sql, &ast, &ctx)
+}
+
+fn lower_aggregate(sql: &str, ast: &ast::Expr, ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
+    let expr = lower(ast, ctx)?;
     if !expr.contains_aggregate() {
         return Err(QueryError::InvalidExpression(format!(
             "metric expression {sql:?} has no aggregate"
@@ -212,17 +259,29 @@ fn lower(e: &ast::Expr, ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
 /// Resolve an identifier path to a column or a field's expression.
 fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, QueryError> {
     let names: Vec<String> = parts.iter().map(identifier_text).collect();
-    let (dataset, name) = match names.as_slice() {
-        [name] => match ctx.dataset {
-            // A field's own definition: a bare name is a physical column.
-            Some(ds) => (ds.to_string(), name.clone()),
-            // A metric: a bare name is another metric, per the schema's
-            // "an unqualified metric reference resolves to a model-scoped
-            // metric".
-            None => return ctx.metrics.lookup(name),
-        },
-        [dataset, name] => (dataset.clone(), name.clone()),
-        _ => {
+    let (model, dataset, name) = match (ctx.scope, names.as_slice()) {
+        // A field's own definition: this is a physical column, full stop.
+        (Scope::FieldDefinition { dataset }, [name]) => {
+            return Ok(Expr::column(dataset, name.clone()));
+        }
+        (Scope::FieldDefinition { .. }, [dataset, name]) => {
+            return Ok(Expr::column(dataset.clone(), name.clone()));
+        }
+        // A model-scoped metric: a bare name is another model-scoped metric.
+        // The spec does not define metric references yet (ADR-0003).
+        (Scope::ModelMetric { .. }, [name]) => return ctx.metrics.lookup(name),
+        (Scope::ModelMetric { model }, [dataset, name]) => (model, dataset.clone(), name.clone()),
+        // A dataset-scoped metric: a bare name is a field of its own dataset.
+        (Scope::DatasetMetric { model, dataset }, [name]) => {
+            (model, dataset.to_string(), name.clone())
+        }
+        (Scope::DatasetMetric { dataset, .. }, [_, _]) => {
+            return Err(QueryError::QualifiedInDatasetMetric {
+                dataset: dataset.to_string(),
+                reference: names.join("."),
+            });
+        }
+        (_, _) => {
             return Err(QueryError::InvalidFieldRef(format!(
                 "identifier {:?} has more than two parts",
                 names.join(".")
@@ -230,14 +289,9 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
         }
     };
 
-    let Some(model) = ctx.model else {
-        // Field-definition mode: this is a physical column, full stop.
-        return Ok(Expr::column(dataset, name));
-    };
-
     // Metric mode: the identifier names a field, which carries its own
-    // expression. Entity names are strings in the document, so they are
-    // matched as written.
+    // expression, or a dataset-scoped metric. Entity names are strings in the
+    // document, so they are matched as written.
     let ds = model
         .datasets
         .iter()
@@ -253,17 +307,38 @@ fn resolve_identifier(parts: &[ast::Ident], ctx: &Ctx<'_>) -> Result<Expr, Query
                 None => QueryError::DatasetNotFound(dataset.clone()),
             }
         })?;
-    let field = ds.fields.iter().find(|f| f.name == name).ok_or_else(|| {
-        let declared = ds.fields.iter().map(|f| f.name.as_str());
-        match only_case_differs(&name, declared) {
+    let Some(field) = ds.fields.iter().find(|f| f.name == name) else {
+        // Fields and dataset-scoped metrics share a namespace, so a name that
+        // is not a field may be a metric, and cannot be both.
+        if ds.metrics.iter().any(|m| m.name == name) {
+            return match ctx.scope {
+                // A model-scoped metric builds on it by substitution, as it
+                // does on another model-scoped metric.
+                Scope::ModelMetric { .. } => ctx.metrics.lookup_dataset_metric(&dataset, &name),
+                _ => Err(QueryError::MetricInDatasetMetric {
+                    dataset: dataset.clone(),
+                    metric: name.clone(),
+                }),
+            };
+        }
+        let declared = ds
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .chain(ds.metrics.iter().map(|m| m.name.as_str()));
+        return Err(match only_case_differs(&name, declared) {
             Some(declared) => QueryError::CaseMismatch {
-                kind: "field",
+                kind: if ds.metrics.iter().any(|m| m.name == declared) {
+                    "metric"
+                } else {
+                    "field"
+                },
                 wanted: format!("{dataset}.{name}"),
                 declared,
             },
             None => QueryError::FieldNotFound(format!("{dataset}.{name}")),
-        }
-    })?;
+        });
+    };
 
     let (field_dialect, sql) = super::pick_expression_dialect(&field.expression)
         .ok_or(QueryError::MissingExpressionSql)?;

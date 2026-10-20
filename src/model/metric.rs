@@ -1,4 +1,4 @@
-//! Model-level metrics (`$defs.Metric`).
+//! Metrics (`$defs.Metric`), model-scoped or dataset-scoped.
 
 use super::ai_context::AiContext;
 use super::enums::DataType;

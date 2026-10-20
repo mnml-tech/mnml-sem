@@ -92,19 +92,7 @@ pub fn bind_query(model: &CompiledModel, spec: &SemanticQuery) -> Result<BoundQu
     let metrics: Vec<CompiledMetric> = spec
         .metrics
         .iter()
-        .map(|name| {
-            model.metric(name).cloned().ok_or_else(|| {
-                // A metric that failed to compile is absent here; say why
-                // rather than claiming it does not exist.
-                match model.issue_for(&IssueTarget::metric(name)) {
-                    Some(issue) => QueryError::NotCompiled {
-                        target: issue.target.to_string(),
-                        reason: issue.message.clone(),
-                    },
-                    None => QueryError::MetricNotFound(name.clone()),
-                }
-            })
-        })
+        .map(|name| resolve_metric(model, name))
         .collect::<Result<_, _>>()?;
 
     let mut required: HashSet<String> = path_datasets;
@@ -239,6 +227,35 @@ fn fanned_datasets(
         joined.push(step.right_dataset.clone());
     }
     fanned
+}
+
+/// A model-scoped metric by name, or a dataset-scoped one as `dataset.metric`.
+///
+/// The exact model-scoped name is tried first; validation refuses a model
+/// whose model-scoped metric is spelled like a dataset-scoped reference, so
+/// the order never decides anything.
+fn resolve_metric(model: &CompiledModel, name: &str) -> Result<CompiledMetric, QueryError> {
+    if let Some(m) = model.metric(name) {
+        return Ok(m.clone());
+    }
+    let target = match name.split_once('.') {
+        Some((ds, m)) => {
+            if let Some(found) = model.dataset_metric(ds, m) {
+                return Ok(found.clone());
+            }
+            IssueTarget::dataset_metric(ds, m)
+        }
+        None => IssueTarget::metric(name),
+    };
+    // A metric that failed to compile is absent here; say why rather than
+    // claiming it does not exist.
+    Err(match model.issue_for(&target) {
+        Some(issue) => QueryError::NotCompiled {
+            target: issue.target.to_string(),
+            reason: issue.message.clone(),
+        },
+        None => QueryError::MetricNotFound(name.to_string()),
+    })
 }
 
 fn parse_field_ref(s: &str) -> Result<(&str, &str), QueryError> {

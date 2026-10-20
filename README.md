@@ -34,6 +34,7 @@ Ossie ──► validate ──► CompiledModel ──► bind_query(SemanticQu
 | **Emit** | `emit::sql::to_sql` — secondary; same structured plan, coalescing a maximal `SELECT` and opening a subquery only at a clause conflict |
 | **Expressions** | SQL expressions (`ANSI_SQL`, `SNOWFLAKE`, `DATABRICKS`, `BIGQUERY`) parsed with [`sqlparser`](https://github.com/apache/datafusion-sqlparser-rs) and lowered to the plan IR ([`plan::ossie_sql`](src/plan/ossie_sql.rs)) |
 | **Metrics** | Composite metrics (`SUM(a) / COUNT(DISTINCT b)`) split into Substrait measures plus a projection; cross-dataset metrics pull in their own joins |
+| **Metrics** | Dataset-scoped metrics (`datasets[].metrics`, queried as `dataset.metric`, and built on by model-scoped metrics the same way) from the [proposal](https://github.com/apache/ossie/pull/591) not yet in the spec — see [ADR-0014](docs/adr/0014-dataset-scoped-metrics-ahead-of-the-schema.md) |
 
 ## Example
 

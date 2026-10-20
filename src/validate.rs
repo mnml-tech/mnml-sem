@@ -65,6 +65,33 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
                 issues,
             );
         }
+
+        let ds_metric_names: Vec<&str> = dataset.metrics.iter().map(|m| m.name.as_str()).collect();
+        for dup in duplicate_strings(&ds_metric_names) {
+            issues.push(format!(
+                "[Unique] duplicate metric name {:?} in dataset {:?} (model {:?})",
+                dup, dataset.name, model_name
+            ));
+        }
+        // Fields and dataset-scoped metrics share one namespace, so
+        // `dataset.name` means exactly one thing.
+        for name in &ds_metric_names {
+            if field_names.contains(name) {
+                issues.push(format!(
+                    "[Unique] {:?} in dataset {:?} names both a field and a metric; they share \
+                     one namespace (model {:?})",
+                    name, dataset.name, model_name
+                ));
+            }
+        }
+
+        for metric in &dataset.metrics {
+            validate_expression(
+                &format!("metric {:?}.{:?}", dataset.name, metric.name),
+                &metric.expression,
+                issues,
+            );
+        }
     }
 
     let metric_names: Vec<&str> = model.metrics.iter().map(|m| m.name.as_str()).collect();
@@ -73,6 +100,26 @@ fn validate_semantic_model(model: &crate::model::SemanticModel, issues: &mut Vec
             "[Unique] duplicate metric name {:?} in model {:?}",
             dup, model_name
         ));
+    }
+
+    // The schema puts no pattern on names, so a model-scoped metric may be
+    // called `orders.total` — which a query could not tell apart from the
+    // dataset-scoped `total` on `orders`.
+    for metric in &model.metrics {
+        let Some((ds, name)) = metric.name.split_once('.') else {
+            continue;
+        };
+        let clashes = model
+            .datasets
+            .iter()
+            .any(|d| d.name == ds && d.metrics.iter().any(|m| m.name == name));
+        if clashes {
+            issues.push(format!(
+                "[Unique] model metric {:?} is spelled the same as the metric {:?} of dataset \
+                 {:?} (model {:?})",
+                metric.name, name, ds, model_name
+            ));
+        }
     }
 
     for metric in &model.metrics {
@@ -258,5 +305,58 @@ relationships:
         let doc = from_yaml_str(yaml).expect("parse");
         let err = validate(&doc).expect_err("must fail");
         assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    /// `people` with a field `id` and the given dataset-scoped metrics.
+    fn with_dataset_metrics(metrics: &[&str]) -> String {
+        let mut yaml = VALID.to_string();
+        yaml.push_str("    metrics:\n");
+        for name in metrics {
+            yaml.push_str(&format!(
+                "      - name: {name}\n        expression:\n          dialects:\n            \
+                 - dialect: ANSI_SQL\n              expression: COUNT(id)\n"
+            ));
+        }
+        yaml
+    }
+
+    #[test]
+    fn validate_accepts_dataset_metrics() {
+        let doc = from_yaml_str(&with_dataset_metrics(&["n", "m"])).expect("parse");
+        validate(&doc).expect("validate");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_dataset_metric_names() {
+        let doc = from_yaml_str(&with_dataset_metrics(&["n", "n"])).expect("parse");
+        let err = validate(&doc).expect_err("must fail");
+        assert!(
+            err.to_string()
+                .contains(r#"duplicate metric name "n" in dataset "people""#),
+            "{err}"
+        );
+    }
+
+    /// Fields and dataset-scoped metrics share one namespace.
+    #[test]
+    fn validate_rejects_a_metric_named_like_a_field() {
+        let doc = from_yaml_str(&with_dataset_metrics(&["id"])).expect("parse");
+        let err = validate(&doc).expect_err("must fail");
+        assert!(
+            err.to_string().contains("names both a field and a metric"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_model_metric_spelled_like_a_dataset_metric() {
+        let mut yaml = with_dataset_metrics(&["n"]);
+        yaml.push_str(
+            "metrics:\n  - name: people.n\n    expression:\n      dialects:\n        \
+             - dialect: ANSI_SQL\n          expression: COUNT(people.id)\n",
+        );
+        let doc = from_yaml_str(&yaml).expect("parse");
+        let err = validate(&doc).expect_err("must fail");
+        assert!(err.to_string().contains("is spelled the same as"), "{err}");
     }
 }

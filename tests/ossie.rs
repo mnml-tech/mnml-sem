@@ -95,6 +95,7 @@ fn roundtrip_yaml_document() {
                     ai_context: None,
                     custom_extensions: vec![],
                 }],
+                metrics: vec![],
                 custom_extensions: vec![],
             }],
             relationships: vec![],
